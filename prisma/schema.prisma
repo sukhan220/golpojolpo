@@ -1,0 +1,114 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql" // or "mysql" / "sqlite" depending on your target DB
+  url      = env("DATABASE_URL")
+}
+
+// -------------------------------------------------------------
+// 1. categories (লাইব্রেরি)
+// -------------------------------------------------------------
+model Category {
+  id        String       @id @default(cuid())
+  docId     String       @unique // Matches Firestore doc ID: "c-1", "c-10", etc.
+  bn        String       // Bengali name: "ছোট গল্প", "ভ্রমণ কাহিনী"
+  en        String?      // English name: "Short Story"
+  audio     Boolean      @default(true)
+  kindle    Boolean      @default(true)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  // Relations
+  books        Book[]
+  shortStories ShortStory[]
+  writers      WriterCategory[]
+
+  @@map("categories")
+}
+
+// -------------------------------------------------------------
+// 2. books (অডিও - Audiobooks)
+// -------------------------------------------------------------
+model Book {
+  id          String    @id @default(cuid())
+  docId       String    @unique // Matches Firestore: "track-001", "track-002"
+  title       String    // "ডিটেকটিভ"
+  artist      String?   // "রবীন্দ্রনাথ ঠাকুর"
+  writer      String?   // "রবীন্দ্রনাথ ঠাকুর"
+  time        String?   // "30:17"
+  url         String    // Audio file stream URL
+  voice       String?   // Narrator: "জয় বিশ্বাস"
+  artwork     String?   // Image URL
+  description String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Relations
+  cateId      String?
+  category    Category? @relation(fields: [cateId], references: [docId])
+
+  writerId    String?
+  author      Writer?   @relation(fields: [writerId], references: [docId])
+
+  @@map("books")
+}
+
+// -------------------------------------------------------------
+// 3. shortStory (ই বুক - eBooks / Short Stories)
+// -------------------------------------------------------------
+model ShortStory {
+  id        String    @id @default(cuid())
+  docId     String    @unique // Matches Firestore: "s-001", "s-002"
+  title     String    // "কনে দেখা"
+  writer    String    // "বিভূতিভূষণ বন্দ্যোপাধ্যায়"
+  fileUrl   String?   // Text/content URL or file path
+  artwork   String?   // Cover image URL
+  content   String?   // Full markdown/text content if stored inline
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  // Relations
+  cateId    String?
+  category  Category? @relation(fields: [cateId], references: [docId])
+
+  writerId  String?
+  author    Writer?   @relation(fields: [writerId], references: [docId])
+
+  @@map("short_stories")
+}
+
+// -------------------------------------------------------------
+// 4. writer (লেখক)
+// -------------------------------------------------------------
+model Writer {
+  id        String           @id @default(cuid())
+  docId     String           @unique // Matches Firestore: "w-1", "w-2"
+  bn        String           // Bengali writer name: "রবীন্দ্রনাথ ঠাকুর"
+  bio       String?
+  avatar    String?
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  // Relations
+  categories   WriterCategory[]
+  books        Book[]
+  shortStories ShortStory[]
+
+  @@map("writers")
+}
+
+// Many-to-many relationship table between Writer and Category
+model WriterCategory {
+  writerId   String
+  categoryId String
+  writer     Writer   @relation(fields: [writerId], references: [docId], onDelete: Cascade)
+  category   Category @relation(fields: [categoryId], references: [docId], onDelete: Cascade)
+
+  @@id([writerId, categoryId])
+  @@map("writer_categories")
+}

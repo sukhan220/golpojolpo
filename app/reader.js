@@ -2,9 +2,66 @@
 
 import { createElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import PageTurn from "../components/PageTurn";
+import BookLoader from "../components/BookLoader";
+import SpeedModal from "../components/SpeedModal";
+import FontSelector, { FONTS_LIST } from "../components/FontSelector";
+import JumpPageModal from "../components/JumpPageModal";
+import AddNoteModal from "../components/AddNoteModal";
+import BooklistModal from "../components/BooklistModal";
+import ChapterSidebar from "../components/ChapterSidebar";
+import LandscapeOverlay from "../components/LandscapeOverlay";
+import { SPEED_MAP } from "../lib/speedMap";
 import { subscribeToReaderBooks } from "../lib/firebase";
+import {
+  ArrowBackIcon,
+  MenuIcon,
+  ChevronBackIcon,
+  ChevronForwardIcon,
+  DocumentTextIcon,
+  BookmarksOutlineIcon,
+  BookmarkFilledIcon,
+  BookmarkOutlineIcon,
+  AddCircleOutlineIcon,
+} from "../components/Icons";
 
 const STORAGE_KEY = "golpojolpo.reader.web.v1";
+const THEME_STORAGE_KEY = "user_theme_index";
+const FILE_CACHE_PREFIX = "golpojolpo_book_file_cache_v2_";
+
+function readCachedBookFile(bookId, fileUrl) {
+  if (typeof window === "undefined" || !bookId) return null;
+  try {
+    const raw = window.localStorage.getItem(`${FILE_CACHE_PREFIX}${bookId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (fileUrl && parsed.fileUrl && parsed.fileUrl !== fileUrl) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedBookFile(bookId, fileUrl, text, isComplete = true) {
+  if (typeof window === "undefined" || !bookId || !text) return;
+  try {
+    window.localStorage.setItem(
+      `${FILE_CACHE_PREFIX}${bookId}`,
+      JSON.stringify({
+        bookId,
+        fileUrl: fileUrl || "",
+        text,
+        isComplete: Boolean(isComplete),
+        byteLength: text.length,
+        updatedAt: Date.now(),
+      }),
+    );
+  } catch {
+    // Ignore storage quota error
+  }
+}
+
 const DEMO_BOOK = {
   id: "demo-river",
   title: "নদীর ওপারে",
@@ -25,18 +82,38 @@ const DEMO_BOOK = {
 };
 
 const THEMES = [
-  { name: "বই", background: "#e0d8c3", page: "#fdfaf1", text: "#2c1e0f", highlight: "#ffe58a" },
-  { name: "কাগজ", background: "#d6d1c7", page: "#f4f1ea", text: "#2c2c2c", highlight: "#ffe58a" },
-  { name: "সেপিয়া", background: "#c5b08b", page: "#e9dcc9", text: "#433422", highlight: "#e6bd69" },
-  { name: "রাত", background: "#121212", page: "#1f1f1f", text: "#d0ccc5", highlight: "#665000" },
-];
-
-const FONTS = [
-  ["Tiro Bangla", '"Tiro Bangla", serif'],
-  ["Anek Bangla", '"Anek Bangla", sans-serif'],
-  ["Noto Sans Bengali", '"Noto Sans Bengali", sans-serif'],
-  ["Serif", "Georgia, serif"],
-  ["Sans-serif", "Arial, sans-serif"],
+  {
+    name: "book",
+    label: "বই",
+    background: "#e0d8c3",
+    page: "#fdfaf1",
+    text: "#2c1e0f",
+    highlight: "#ffe58a",
+  },
+  {
+    name: "paper",
+    label: "কাগজ",
+    background: "#d6d1c7",
+    page: "#f4f1ea",
+    text: "#2c2c2c",
+    highlight: "#ffe58a",
+  },
+  {
+    name: "sepia",
+    label: "সেপিয়া",
+    background: "#c5b08b",
+    page: "#e9dcc9",
+    text: "#433422",
+    highlight: "#e6bd69",
+  },
+  {
+    name: "night",
+    label: "রাত",
+    background: "#121212",
+    page: "#1f1f1f",
+    text: "#b0b0b0",
+    highlight: "#665000",
+  },
 ];
 
 const HTML_READER_TAGS = new Set([
@@ -55,13 +132,71 @@ const HTML_READER_STYLE_PROPERTIES = new Set([
 ]);
 
 function splitBook(text, title) {
-  const rawPages = text.split(/---page---/i);
+  // 1. First split by explicit ---page--- markers
+  const rawBlocks = text.split(/\s*---page---\s*/i);
+  const MAX_CHARS_PER_PAGE = 1450;
+
+  // 2. If any ---page--- block is very long (or if there were only a few ---page--- markers for a long story),
+  // subdivide long blocks along paragraph boundaries so every paragraph gets its own readable page and nothing is cut off!
+  const expandedPages = [];
+  for (const block of rawBlocks) {
+    const trimmedBlock = block.trim();
+    if (!trimmedBlock) continue;
+
+    if (trimmedBlock.length <= MAX_CHARS_PER_PAGE) {
+      expandedPages.push(trimmedBlock);
+      continue;
+    }
+
+    const lines = trimmedBlock.split(/\n+/);
+    let currentChunk = [];
+    let currentLen = 0;
+
+    for (const line of lines) {
+      const trimmedLine = line.trim();
+      if (!trimmedLine) continue;
+
+      if (/^---chapter:/i.test(trimmedLine) && currentChunk.length > 0) {
+        expandedPages.push(currentChunk.join("\n\n"));
+        currentChunk = [trimmedLine];
+        currentLen = trimmedLine.length;
+        continue;
+      }
+
+      // If adding this paragraph exceeds MAX_CHARS_PER_PAGE and we already have content on this page, start a new page
+      if (currentChunk.length > 0 && currentLen + trimmedLine.length > MAX_CHARS_PER_PAGE) {
+        expandedPages.push(currentChunk.join("\n\n"));
+        currentChunk = [trimmedLine];
+        currentLen = trimmedLine.length;
+      } else {
+        currentChunk.push(trimmedLine);
+        currentLen += trimmedLine.length;
+      }
+    }
+
+    if (currentChunk.length > 0) {
+      expandedPages.push(currentChunk.join("\n\n"));
+    }
+  }
+
+  const finalRawPages = expandedPages.length > 0 ? expandedPages : [text];
+
   const chapters = [];
-  const pages = rawPages.map((rawPage, index) => {
-    const chapterMatch = rawPage.match(/---chapter:\s*(.*?)---/i);
-    if (chapterMatch) chapters.push({ title: chapterMatch[1].trim(), pageIndex: index });
-    return rawPage.replace(/---chapter:\s*.*?---/i, "").trim();
-  });
+  const pages = finalRawPages
+    .map((rawPage, index) => {
+      // Extract all ---chapter: অধ্যায়ের নাম--- markers on this page
+      const chapterRegex = /---chapter:\s*(.*?)---/gi;
+      let match;
+      while ((match = chapterRegex.exec(rawPage)) !== null) {
+        const chapTitle = match[1].trim();
+        if (chapTitle) {
+          chapters.push({ title: chapTitle, pageIndex: index });
+        }
+      }
+      return rawPage.replace(/---chapter:\s*.*?---/gi, "").trim();
+    })
+    .filter((p, idx, arr) => p.length > 0 || arr.length === 1);
+
   return {
     pages: pages.length ? pages : [text],
     chapters: chapters.length ? chapters : [{ title: title || "শুরু", pageIndex: 0 }],
@@ -89,7 +224,7 @@ function safeHtmlUrl(value, baseUrl, image = false) {
       return url.toString();
     }
   } catch (error) {
-    console.warn("Ignoring an invalid URL in book HTML.", error);
+    console.warn("Ignoring invalid URL in book HTML.", error);
   }
   return undefined;
 }
@@ -141,9 +276,7 @@ function renderHtmlNode(node, baseUrl, key) {
     }
   }
 
-  return createElement(tagName, props, ...(
-    HTML_READER_VOID_TAGS.has(tagName) ? [] : children
-  ));
+  return createElement(tagName, props, ...(HTML_READER_VOID_TAGS.has(tagName) ? [] : children));
 }
 
 function renderBookHtml(text, baseUrl) {
@@ -188,20 +321,22 @@ function renderHighlights(text, notes, color, pageIndex, paragraphOffset, onHigh
   const parts = [];
   let cursor = 0;
   while (cursor < text.length) {
-    const matches = notes.map((note) => {
-      const ref = note.ref || {};
-      if (Number.isInteger(ref.startOffset) && Number.isInteger(ref.endOffset)) {
-        const pageStart = pageIndex === ref.startPage ? ref.startOffset : 0;
-        const pageEnd = pageIndex === ref.endPage ? ref.endOffset : Number.POSITIVE_INFINITY;
-        const start = Math.max(cursor, pageStart - paragraphOffset);
-        const end = Math.min(text.length, pageEnd - paragraphOffset);
-        return start < end && start < text.length
-          ? { note, start, end }
-          : null;
-      }
-      const index = ref.text ? text.indexOf(ref.text, cursor) : -1;
-      return index >= 0 ? { note, start: index, end: index + ref.text.length } : null;
-    }).filter(Boolean).sort((first, second) => first.start - second.start);
+    const matches = notes
+      .map((note) => {
+        const ref = note.ref || {};
+        if (Number.isInteger(ref.startOffset) && Number.isInteger(ref.endOffset)) {
+          const pageStart = pageIndex === ref.startPage ? ref.startOffset : 0;
+          const pageEnd = pageIndex === ref.endPage ? ref.endOffset : Number.POSITIVE_INFINITY;
+          const start = Math.max(cursor, pageStart - paragraphOffset);
+          const end = Math.min(text.length, pageEnd - paragraphOffset);
+          return start < end && start < text.length ? { note, start, end } : null;
+        }
+        const index = ref.text ? text.indexOf(ref.text, cursor) : -1;
+        return index >= 0 ? { note, start: index, end: index + ref.text.length } : null;
+      })
+      .filter(Boolean)
+      .sort((first, second) => first.start - second.start);
+
     const match = matches[0];
     if (!match) {
       parts.push(text.slice(cursor));
@@ -213,7 +348,7 @@ function renderHighlights(text, notes, color, pageIndex, paragraphOffset, onHigh
         key={`${match.note.id}-${match.start}`}
         onClick={(event) => {
           event.stopPropagation();
-          onHighlightClick(match.note.id, event.clientX, event.clientY);
+          onHighlightClick(match.note.id, match.note.ref?.text || match.note.title, event.clientX, event.clientY);
         }}
         style={{ backgroundColor: color }}
       >
@@ -243,8 +378,6 @@ function renderMarkdownParagraph(text, notes, color, pageIndex, paragraphOffset,
       console.warn("Could not resolve a Markdown image URL.", error);
     }
     parts.push(
-      // Markdown image URLs are user-provided and don't have build-time dimensions.
-      // eslint-disable-next-line @next/next/no-img-element
       <img
         key={`markdown-image-${match.index}`}
         className="reader-markdown-image"
@@ -268,77 +401,156 @@ function renderMarkdownParagraph(text, notes, color, pageIndex, paragraphOffset,
   return parts;
 }
 
-function AppIcon({ children }) {
-  return <span className="icon" aria-hidden="true">{children}</span>;
-}
-
-export default function ReaderApp() {
+export default function ReaderApp({ initialStory, onBack } = {}) {
   const [books, setBooks] = useState([DEMO_BOOK]);
   const [databaseBooks, setDatabaseBooks] = useState([]);
   const [databaseLoading, setDatabaseLoading] = useState(true);
   const [databaseError, setDatabaseError] = useState("");
   const [library, setLibrary] = useState({ history: {}, bookmarks: {}, notes: {}, booklists: {} });
-  const [activeBookId, setActiveBookId] = useState(null);
+  const [activeBookId, setActiveBookId] = useState(initialStory?.id || null);
   const [hydrated, setHydrated] = useState(false);
   const [storageError, setStorageError] = useState("");
   const [importError, setImportError] = useState("");
   const [urlInput, setUrlInput] = useState("");
   const [urlLoading, setUrlLoading] = useState(false);
 
+  const initialBookObj = useMemo(() => {
+    if (!initialStory) return null;
+    const hasRemoteFile = Boolean(initialStory.fileUrl && initialStory.fileUrl.trim());
+    return {
+      id: initialStory.id || "selected-story",
+      documentId: initialStory.id || "selected-story",
+      title: initialStory.title || "নামহীন বই",
+      author: initialStory.writer || initialStory.author || "লেখক",
+      writer: initialStory.writer || initialStory.author || "লেখক",
+      artwork: initialStory.artwork || "",
+      fileUrl: hasRemoteFile ? initialStory.fileUrl.trim() : "",
+      text: hasRemoteFile
+        ? initialStory.content || ""
+        : initialStory.content || initialStory.sampleText || DEMO_BOOK.text,
+      sourceCollection: "shortStory",
+      source: "firestore",
+    };
+  }, [initialStory]);
+
+  useEffect(() => {
+    if (initialBookObj) {
+      setBooks((prev) => [initialBookObj, ...prev.filter((b) => b.id !== initialBookObj.id)]);
+      setActiveBookId(initialBookObj.id);
+
+      const savedData = readSavedData();
+      const rawId = (initialBookObj.documentId || initialBookObj.id || "").replace(/^shortStory:/, "");
+      const savedHist =
+        savedData.library?.history?.[initialBookObj.id] ||
+        savedData.library?.history?.[rawId] ||
+        savedData.library?.history?.[`shortStory:${rawId}`];
+      if (savedHist) {
+        setCurrentPage(Math.max(0, savedHist.page || 0));
+        scrollRestoreRef.current = { y: savedHist.scrollY || 0, page: savedHist.page || 0 };
+      } else {
+        setCurrentPage(0);
+        scrollRestoreRef.current = null;
+      }
+      // Always start in Single Page mode
+      setFullscreen(false);
+      setIsRotatedLandscape(false);
+      setSpreadMode(false);
+      setScrollMode(true);
+    }
+  }, [initialBookObj]);
+
+  // Reading settings
   const [currentPage, setCurrentPage] = useState(0);
-  const [scrollMode, setScrollMode] = useState(false);
+  const [scrollMode, setScrollMode] = useState(true); // Default scrollMode
   const [spreadMode, setSpreadMode] = useState(false);
   const [pageTurn, setPageTurn] = useState(null);
-  const [fontSize, setFontSize] = useState(18);
-  const [fontFamily, setFontFamily] = useState(FONTS[0][1]);
-  const [zoom, setZoom] = useState(1);
+  const [fontSize, setFontSize] = useState(16);
+  const [selectedFontName, setSelectedFontName] = useState("serif");
+  const [fontFamily, setFontFamily] = useState(FONTS_LIST[0].family);
   const [themeIndex, setThemeIndex] = useState(0);
+
+  // Auto-scroll with exact Speed mapping
   const [autoScroll, setAutoScroll] = useState(false);
-  const [speed, setSpeed] = useState(1);
+  const [speedX, setSpeedX] = useState(1);
+  const [autoScrollSpeed, setAutoScrollSpeed] = useState(0.4);
+  const [speedModalVisible, setSpeedModalVisible] = useState(false);
+
+  // Fullscreen & Mobile 90-degree Landscape Rotation Overlay
   const [fullscreen, setFullscreen] = useState(false);
-  const [controlsVisible, setControlsVisible] = useState(false);
-  const [panel, setPanel] = useState("");
-  const [jumpInput, setJumpInput] = useState("");
-  const [listName, setListName] = useState("");
-  const [selectedText, setSelectedText] = useState("");
-  const [selectedPage, setSelectedPage] = useState(0);
-  const [selectionData, setSelectionData] = useState(null);
-  const [selectedHighlightId, setSelectedHighlightId] = useState(null);
+  const [isRotatedLandscape, setIsRotatedLandscape] = useState(false);
+  const [showOverlay, setShowOverlay] = useState(false);
+  const overlayTimerRef = useRef(null);
+  const baseFontSizeRef = useRef(16);
+  const prevReaderStateRef = useRef(null);
+
+  // Navigation Modals
+  const [jumpModalVisible, setJumpModalVisible] = useState(false);
+  const [sidebarVisible, setSidebarVisible] = useState(false);
+  const [sidebarTab, setSidebarTab] = useState("chapters"); // 'chapters' | 'bookmarks' | 'notes'
+  const [booklistModalVisible, setBooklistModalVisible] = useState(false);
+
+  // Note Modal & Selection Context Menu
+  const [addNoteModalVisible, setAddNoteModalVisible] = useState(false);
   const [noteTitle, setNoteTitle] = useState("");
-  const [noteContent, setNoteContent] = useState("");
-  const [selectionPoint, setSelectionPoint] = useState(null);
+  const [noteText, setNoteText] = useState("");
+  const [selectedText, setSelectedText] = useState("");
+  const [selectionData, setSelectionData] = useState(null);
+  const [floatingVisible, setFloatingVisible] = useState(false);
+  const [actionMode, setActionMode] = useState(null); // 'save' | 'delete'
+  const [floatingPos, setFloatingPos] = useState({ x: 0, y: 0 });
+  const [selectedHighlightId, setSelectedHighlightId] = useState(null);
+
   const [toast, setToast] = useState("");
   const [bookContent, setBookContent] = useState({ id: "", text: "", loading: false, error: "" });
+
   const readerRootRef = useRef(null);
   const fileInputRef = useRef(null);
   const scrollRootRef = useRef(null);
   const saveTimerRef = useRef(null);
-  const pinchDistanceRef = useRef(0);
-  const touchStartRef = useRef(null);
-  const lastTouchTapRef = useRef(null);
-  const lastTouchToggleAtRef = useRef(0);
-  const controlsTimerRef = useRef(null);
-  const previousSpreadModeRef = useRef(null);
-  const usingCssFullscreenRef = useRef(false);
+  const lastTapRef = useRef(0);
+  const lastScrollYRef = useRef(0);
+  const scrollRestoreRef = useRef(null);
   const pageTurnRef = useRef(null);
   const pageTurnTimerRef = useRef(null);
-  const scrollRestoreRef = useRef(null);
   const currentPageRef = useRef(currentPage);
+
+  // Two-finger touch swipe detection for theme changing
+  const touchStartYRef = useRef(0);
+  const isTwoFingerRef = useRef(false);
+  const hasTriggeredThemeRef = useRef(false);
+  const [flickering, setFlickering] = useState(false);
 
   useEffect(() => {
     currentPageRef.current = currentPage;
   }, [currentPage]);
 
+  // Initial load
   useEffect(() => {
-    const timer = setTimeout(() => {
-      const saved = readSavedData();
-      setBooks(saved.books);
-      setLibrary(saved.library);
-      setHydrated(true);
-    }, 0);
-    return () => clearTimeout(timer);
+    const saved = readSavedData();
+    setBooks((prev) => {
+      const merged = [...saved.books];
+      prev.forEach((b) => {
+        if (!merged.some((item) => item.id === b.id)) {
+          merged.unshift(b);
+        }
+      });
+      return merged;
+    });
+    setLibrary(saved.library);
+
+    try {
+      const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+      if (savedTheme !== null) {
+        setThemeIndex(Number(savedTheme) % THEMES.length);
+      }
+    } catch {
+      // ignore
+    }
+
+    setHydrated(true);
   }, []);
 
+  // Firebase subscription
   useEffect(() => {
     let unsubscribe;
     const timer = setTimeout(() => {
@@ -367,38 +579,93 @@ export default function ReaderApp() {
     };
   }, []);
 
+  // Persist to local storage
   useEffect(() => {
     if (!hydrated) return;
-    let timer;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ books, library }));
-      if (storageError) timer = setTimeout(() => setStorageError(""), 0);
     } catch (error) {
       console.error("Could not save reader data to local storage.", error);
-      timer = setTimeout(() => setStorageError("এই ব্রাউজারে সংরক্ষণের জায়গা শেষ বা অনুপলব্ধ। বইয়ের তথ্য export করে রাখুন।"), 0);
+      setStorageError("এই ব্রাউজারে সংরক্ষণের জায়গা শেষ বা অনুপলব্ধ। বইয়ের তথ্য export করে রাখুন।");
     }
-    return () => clearTimeout(timer);
-  }, [books, library, hydrated, storageError]);
+  }, [books, library, hydrated]);
 
-  const allBooks = useMemo(() => [...databaseBooks, ...books], [databaseBooks, books]);
-  const activeBook = allBooks.find((book) => book.id === activeBookId) || null;
+  const allBooks = useMemo(() => {
+    const combined = [...databaseBooks, ...books];
+    if (initialBookObj && !combined.some((b) => b.id === initialBookObj.id)) {
+      combined.unshift(initialBookObj);
+    }
+    return combined;
+  }, [databaseBooks, books, initialBookObj]);
+  const activeBook =
+    allBooks.find(
+      (book) =>
+        book.id === activeBookId ||
+        book.documentId === activeBookId ||
+        book.id === `shortStory:${activeBookId}`,
+    ) ||
+    initialBookObj ||
+    allBooks[0] ||
+    DEMO_BOOK;
+  const resolvedBookId = activeBook?.id || activeBookId || DEMO_BOOK.id;
   const activeBookText = activeBook?.text;
   const activeBookFileUrl = activeBook?.fileUrl;
-  const currentText = activeBookText || (bookContent.id === activeBook?.id ? bookContent.text : "");
+  const currentText =
+    activeBookText ||
+    (bookContent.id === resolvedBookId || bookContent.id === activeBookId ? bookContent.text : "");
   const parsed = useMemo(
     () => (activeBook && currentText ? splitBook(currentText, activeBook.title) : { pages: [], chapters: [] }),
     [activeBook, currentText],
   );
   const pages = parsed.pages;
-  const theme = THEMES[themeIndex];
-  const bookNotes = activeBook ? library.notes[activeBook.id] || [] : [];
+  const theme = THEMES[themeIndex] || THEMES[0];
+
+  // Normalize bookNotes (handles both array and { quotes: [...] })
+  const bookNotes = useMemo(() => {
+    if (!activeBook) return [];
+    const raw = library.notes[activeBook.id];
+    if (Array.isArray(raw)) return raw;
+    if (Array.isArray(raw?.quotes)) return raw.quotes;
+    return [];
+  }, [activeBook, library.notes]);
+
   const bookmarks = activeBook ? library.bookmarks[activeBook.id] || [] : [];
   const totalPages = pages.length;
-  const pageLabel = totalPages ? `${currentPage + 1} / ${totalPages}` : "0 / 0";
-  const activeBookLoading = Boolean(activeBook && !activeBookText
-    && (bookContent.id !== activeBook.id || bookContent.loading));
-  const activeBookError = activeBook && bookContent.id === activeBook.id ? bookContent.error : "";
+  const totalLeaves = Math.max(1, Math.ceil(totalPages / 2));
+  const currentLeafIndex = Math.min(totalLeaves, Math.floor(currentPage / 2) + 1);
 
+  const activeBookLoading = Boolean(
+    activeBook &&
+      !activeBookText &&
+      bookContent.id !== resolvedBookId &&
+      bookContent.id !== activeBookId
+      ? true
+      : bookContent.loading,
+  );
+  const activeBookError =
+    activeBook && (bookContent.id === resolvedBookId || bookContent.id === activeBookId)
+      ? bookContent.error
+      : "";
+
+  // Auto-scroll speed calculation
+  useEffect(() => {
+    const calculated = SPEED_MAP[speedX] ?? (0.2 * speedX);
+    setAutoScrollSpeed(calculated);
+  }, [speedX]);
+
+  // Auto-scroll interval
+  useEffect(() => {
+    if (!autoScroll || !scrollMode) return undefined;
+    const timer = setInterval(() => {
+      scrollRootRef.current?.scrollBy({
+        top: autoScrollSpeed,
+        behavior: "auto",
+      });
+    }, 50);
+    return () => clearInterval(timer);
+  }, [autoScroll, scrollMode, autoScrollSpeed]);
+
+  // Turn animation complete
   const completePageTurn = useCallback(() => {
     const turn = pageTurnRef.current;
     if (!turn) return;
@@ -414,18 +681,48 @@ export default function ReaderApp() {
     pageTurnTimerRef.current = null;
   }, []);
 
-  useEffect(() => () => {
-    clearTimeout(pageTurnTimerRef.current);
-    clearTimeout(controlsTimerRef.current);
-    pageTurnRef.current = null;
-  }, []);
+  // Theme toggle with persistent storage and flicker animation
+  const toggleTheme = useCallback(() => {
+    const nextIndex = (themeIndex + 1) % THEMES.length;
+    setThemeIndex(nextIndex);
+    setFlickering(true);
+    setTimeout(() => setFlickering(false), 400);
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, nextIndex.toString());
+    } catch {
+      // ignore
+    }
+  }, [themeIndex]);
 
-  const revealFullscreenControls = () => {
-    setControlsVisible(true);
-    clearTimeout(controlsTimerRef.current);
-    controlsTimerRef.current = setTimeout(() => setControlsVisible(false), 3500);
+  // Overlay management
+  const triggerOverlay = () => {
+    if (showOverlay) {
+      setShowOverlay(false);
+      if (overlayTimerRef.current) {
+        clearTimeout(overlayTimerRef.current);
+        overlayTimerRef.current = null;
+      }
+    } else {
+      setShowOverlay(true);
+      if (overlayTimerRef.current) clearTimeout(overlayTimerRef.current);
+      overlayTimerRef.current = setTimeout(() => {
+        setShowOverlay(false);
+        overlayTimerRef.current = null;
+      }, 5000);
+    }
   };
 
+  const resetOverlayTimer = () => {
+    if (showOverlay) {
+      if (overlayTimerRef.current) clearTimeout(overlayTimerRef.current);
+      overlayTimerRef.current = setTimeout(() => {
+        setShowOverlay(false);
+        overlayTimerRef.current = null;
+      }, 5000);
+    }
+  };
+
+  // Open book & restore position
   const openBook = (bookId) => {
     const book = allBooks.find((item) => item.id === bookId);
     if (!book) return;
@@ -434,109 +731,614 @@ export default function ReaderApp() {
     const history = library.history[bookId];
     const pageCount = book.text ? splitBook(book.text, book.title).pages.length : history?.total || 1;
     setCurrentPage(Math.min(Math.max(history?.page || 0, 0), Math.max(pageCount - 1, 0)));
-    setScrollMode(Boolean(history?.scrollMode));
+    setScrollMode(history?.scrollMode !== undefined ? Boolean(history.scrollMode) : true);
     setSpreadMode(Boolean(history?.spreadMode));
     setAutoScroll(false);
     scrollRestoreRef.current = history ? { y: history.scrollY, page: history.page } : null;
     setActiveBookId(bookId);
   };
 
+  // Fetch & Cache fileUrl with streaming partial cache + automatic re-fetch if incomplete
   useEffect(() => {
-    if (!activeBookId || activeBookText) return undefined;
-
+    if (!resolvedBookId || activeBookText) return undefined;
     const abortController = new AbortController();
-    const timer = setTimeout(() => {
-      if (!activeBookFileUrl) {
-        setBookContent({ id: activeBookId, text: "", loading: false, error: "এই বইয়ের fileUrl নেই। Firebase shortStory ডকুমেন্টে fileUrl যোগ করুন।" });
-        return;
+
+    const cleanUrl = (activeBookFileUrl || "")
+      .toString()
+      .replace(/^['"“”‘’\s]+|['"“”‘’\s]+$/g, "")
+      .trim();
+
+    if (!cleanUrl) {
+      setBookContent({
+        id: resolvedBookId,
+        text: DEMO_BOOK.text,
+        loading: false,
+        error: "",
+      });
+      return undefined;
+    }
+
+    let directUrl = cleanUrl;
+    if (directUrl.includes("dropbox.com")) {
+      directUrl = directUrl.replace("www.dropbox.com", "dl.dropboxusercontent.com");
+      if (directUrl.includes("dl=0")) {
+        directUrl = directUrl.replace("dl=0", "raw=1");
+      } else if (!directUrl.includes("raw=1") && !directUrl.includes("dl=1")) {
+        directUrl += directUrl.includes("?") ? "&raw=1" : "?raw=1";
       }
-      setBookContent({ id: activeBookId, text: "", loading: true, error: "" });
-      fetch(activeBookFileUrl, { signal: abortController.signal })
-        .then((response) => {
-          if (!response.ok) throw new Error(`বইয়ের ফাইল লোড ব্যর্থ (HTTP ${response.status})`);
-          return response.text();
-        })
-        .then((text) => {
-          if (!text.trim()) throw new Error("বইয়ের ফাইলটি খালি।");
-          setBookContent({ id: activeBookId, text, loading: false, error: "" });
-        })
-        .catch((error) => {
-          if (error.name === "AbortError") return;
-          console.error("Could not load the Firebase book file.", error);
+    }
+
+    const cacheId = (activeBook?.documentId || resolvedBookId).replace(/^shortStory:/, "");
+    const cached =
+      readCachedBookFile(cacheId, directUrl) ||
+      readCachedBookFile(resolvedBookId, directUrl);
+
+    // 1. If completely loaded & cached previously, serve immediately from cache without network hit!
+    if (cached && cached.isComplete && cached.text && cached.text.trim().length > 0) {
+      setBookContent({
+        id: resolvedBookId,
+        text: cached.text,
+        loading: false,
+        error: "",
+      });
+      return undefined;
+    }
+
+    // 2. If partially cached (e.g., previous load was interrupted), show the partial text immediately while fetching the full file in the background!
+    const hasPartialCache = Boolean(cached && cached.text && cached.text.trim().length > 0);
+    if (hasPartialCache) {
+      setBookContent({
+        id: resolvedBookId,
+        text: cached.text,
+        loading: false,
+        error: "",
+      });
+    } else {
+      setBookContent({ id: resolvedBookId, text: "", loading: true, error: "" });
+    }
+
+    const timer = setTimeout(async () => {
+      let accumulatedText = "";
+      try {
+        const proxyUrl = `/api/stream?url=${encodeURIComponent(directUrl)}`;
+        let response = await fetch(proxyUrl, { signal: abortController.signal });
+        if (!response.ok) {
+          response = await fetch(directUrl, { signal: abortController.signal });
+        }
+        if (!response.ok) {
+          throw new Error(`বইয়ের ফাইল লোড ব্যর্থ (HTTP ${response.status})`);
+        }
+
+        // Stream chunks progressively so whatever is loaded so far is cached even if interrupted
+        const expectedBytes = Number(response.headers.get("content-length") || 0);
+        let receivedBytes = 0;
+
+        if (response.body && typeof response.body.getReader === "function") {
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder("utf-8");
+          let done = false;
+
+          while (!done) {
+            const { value, done: readerDone } = await reader.read();
+            done = readerDone;
+            if (value) {
+              receivedBytes += value.byteLength;
+              accumulatedText += decoder.decode(value, { stream: !done });
+              // Cache partial progress as chunks arrive
+              if (accumulatedText.trim().length > 0) {
+                writeCachedBookFile(cacheId, directUrl, accumulatedText, false);
+                if (cacheId !== resolvedBookId) {
+                  writeCachedBookFile(resolvedBookId, directUrl, accumulatedText, false);
+                }
+              }
+            }
+          }
+        } else {
+          accumulatedText = await response.text();
+          receivedBytes = new Blob([accumulatedText]).size;
+        }
+
+        if (!accumulatedText.trim()) {
+          throw new Error("বইয়ের ফাইলটি খালি।");
+        }
+
+        // Only mark as 100% complete if we received all expected bytes (or if Content-Length was not sent and stream ended cleanly)
+        const isFullyLoaded = expectedBytes > 0 ? receivedBytes >= expectedBytes : true;
+
+        writeCachedBookFile(cacheId, directUrl, accumulatedText, isFullyLoaded);
+        if (cacheId !== resolvedBookId) {
+          writeCachedBookFile(resolvedBookId, directUrl, accumulatedText, isFullyLoaded);
+        }
+
+        setBookContent({
+          id: resolvedBookId,
+          text: accumulatedText,
+          loading: false,
+          error: "",
+        });
+      } catch (error) {
+        if (error.name === "AbortError") {
+          // User closed or switched before full load completed — keep whatever partial text was loaded cached as isComplete: false
+          if (accumulatedText.trim().length > 0) {
+            writeCachedBookFile(cacheId, directUrl, accumulatedText, false);
+          }
+          return;
+        }
+        console.error("Could not load the Firebase book file.", error);
+        // If we had partial cache or accumulated partial text, let the user read what was loaded so far
+        const fallbackText = accumulatedText.trim() || (hasPartialCache ? cached.text : "");
+        if (fallbackText) {
+          writeCachedBookFile(cacheId, directUrl, fallbackText, false);
           setBookContent({
-            id: activeBookId,
+            id: resolvedBookId,
+            text: fallbackText,
+            loading: false,
+            error: "",
+          });
+        } else {
+          setBookContent({
+            id: resolvedBookId,
             text: "",
             loading: false,
-            error: error.message?.includes("fetch")
-              ? "বইয়ের ফাইল লোড করা যাচ্ছে না। ফাইল সার্ভারে CORS অনুমতি দিন, অথবা fileUrl যাচাই করুন।"
-              : error.message || "বইয়ের ফাইল লোড করা যায়নি।",
+            error: error.message || "বইয়ের ফাইল লোড করা যায়নি।",
           });
-        });
+        }
+      }
     }, 0);
+
     return () => {
       clearTimeout(timer);
       abortController.abort();
     };
-  }, [activeBookId, activeBookFileUrl, activeBookText]);
+  }, [resolvedBookId, activeBookFileUrl, activeBookText, activeBook?.documentId]);
 
-  const saveHistory = useCallback((page, scrollY = 0) => {
-    if (!activeBook) return;
-    setLibrary((current) => ({
-      ...current,
-      history: {
-        ...current.history,
-        [activeBook.id]: {
-          page,
-          scrollY,
-          scrollMode,
-          spreadMode,
-          total: pages.length,
-          type: "reader",
-          sourceType: activeBook.sourceCollection || "local",
-          lastReadAt: Date.now(),
+  // Save history with debounce (saves under both raw ID and shortStory:ID + syncs to GolpoJolpo main History store)
+  const saveHistory = useCallback(
+    (page, scrollY = 0) => {
+      if (!activeBook) return;
+      const rawDocId = (activeBook.documentId || activeBook.id || "").replace(/^shortStory:/, "");
+      const histPayload = {
+        page,
+        scrollY,
+        scrollMode,
+        spreadMode,
+        total: pages.length,
+        type: "reader",
+        sourceType: activeBook.sourceCollection || "local",
+        fileUrl: activeBook.fileUrl || "",
+        lastReadAt: Date.now(),
+      };
+
+      setLibrary((current) => ({
+        ...current,
+        history: {
+          ...current.history,
+          [activeBook.id]: histPayload,
+          ...(rawDocId ? { [rawDocId]: histPayload, [`shortStory:${rawDocId}`]: histPayload } : {}),
         },
-      },
-    }));
-  }, [activeBook, pages.length, scrollMode, spreadMode]);
+      }));
 
-  useEffect(() => {
-    if (!activeBook || !scrollMode) return undefined;
-    const frame = requestAnimationFrame(() => {
-      const restore = scrollRestoreRef.current;
-      if (restore?.y) {
-        scrollRootRef.current?.scrollTo({ top: restore.y, behavior: "auto" });
-      } else {
-        const page = scrollRootRef.current?.querySelector(`[data-reader-page="${currentPageRef.current}"]`);
-        if (page) scrollRootRef.current.scrollTo({ top: page.offsetTop, behavior: "auto" });
+      // Sync to main app unified History (golpojolpo_history_v1)
+      try {
+        const total = Math.max(1, pages.length);
+        const pct = Math.min(100, Math.max(1, Math.round(((page + 1) / total) * 100)));
+        const rawHist = localStorage.getItem("golpojolpo_history_v1");
+        const list = rawHist ? JSON.parse(rawHist) : [];
+        const canonicalId = rawDocId || activeBook.id;
+        const entryId = `ebook:${canonicalId}`;
+        const newEntry = {
+          id: entryId,
+          type: "ebook",
+          itemId: canonicalId,
+          title: activeBook.title,
+          artist: activeBook.writer || activeBook.author || "",
+          artwork: activeBook.artwork || "",
+          fileUrl: activeBook.fileUrl || "",
+          letter: (activeBook.title || "গ").trim().slice(0, 2),
+          page,
+          totalPages: total,
+          scrollTop: scrollY,
+          scrollPercent: pct,
+          story: initialStory || activeBook,
+          updatedAt: Date.now(),
+        };
+        const nextList = [
+          newEntry,
+          ...(Array.isArray(list)
+            ? list.filter((x) => x.id !== entryId && x.itemId !== activeBook.id)
+            : []),
+        ].slice(0, 60);
+        localStorage.setItem("golpojolpo_history_v1", JSON.stringify(nextList));
+      } catch {
+        // Ignore storage error
       }
-      scrollRestoreRef.current = null;
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [activeBookId, scrollMode, activeBook]);
+    },
+    [activeBook, initialStory, pages.length, scrollMode, spreadMode],
+  );
 
   useEffect(() => {
     if (!activeBook || !hydrated || !pages.length || bookContent.loading) return;
     clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
-      saveHistory(currentPage, scrollMode ? scrollRootRef.current?.scrollTop || 0 : 0);
-    }, 450);
+      saveHistory(currentPage, scrollMode ? lastScrollYRef.current : 0);
+    }, 500);
     return () => clearTimeout(saveTimerRef.current);
   }, [activeBook, currentPage, scrollMode, hydrated, saveHistory, pages.length, bookContent.loading]);
 
+  // Restore scroll when pages finish loading
   useEffect(() => {
-    if (!autoScroll || !scrollMode) return undefined;
-    const timer = setInterval(() => {
-      scrollRootRef.current?.scrollBy({ top: 0.4 * speed, behavior: "auto" });
-    }, 50);
-    return () => clearInterval(timer);
-  }, [autoScroll, scrollMode, speed]);
+    if (!activeBook || !scrollMode || !pages.length || bookContent.loading) return undefined;
+    const frame = requestAnimationFrame(() => {
+      const restore = scrollRestoreRef.current;
+      if (restore?.y) {
+        scrollRootRef.current?.scrollTo({ top: restore.y, behavior: "auto" });
+      } else if (restore?.page || currentPageRef.current > 0) {
+        const targetIdx = restore?.page ?? currentPageRef.current;
+        const pageEl = scrollRootRef.current?.querySelector(`[data-reader-page="${targetIdx}"]`);
+        if (pageEl) scrollRootRef.current?.scrollTo({ top: pageEl.offsetTop, behavior: "auto" });
+      }
+      scrollRestoreRef.current = null;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeBookId, scrollMode, activeBook, pages.length, bookContent.loading]);
 
+  // Toast auto-hide
   useEffect(() => {
     if (!toast) return undefined;
-    const timer = setTimeout(() => setToast(""), 2600);
+    const timer = setTimeout(() => setToast(""), 2500);
     return () => clearTimeout(timer);
   }, [toast]);
 
+  // Navigation handlers
+  const handleJumpPage = useCallback(
+    (pageIndex) => {
+      const target = Math.max(0, Math.min(Number(pageIndex) || 0, totalPages - 1));
+      if (scrollMode) {
+        setCurrentPage(target);
+        const element = document.querySelector(`[data-reader-page="${target}"]`);
+        if (element && scrollRootRef.current) {
+          element.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      } else {
+        const step = spreadMode ? 2 : 1;
+        if (Math.abs(target - currentPage) === step) {
+          const turn = {
+            id: `${Date.now()}-${target}`,
+            from: currentPage,
+            target,
+            direction: target > currentPage ? "forward" : "backward",
+          };
+          pageTurnRef.current = turn;
+          setPageTurn(turn);
+          pageTurnTimerRef.current = setTimeout(() => {
+            completePageTurn();
+            setPageTurn(null);
+          }, 800);
+        } else {
+          setCurrentPage(target);
+        }
+      }
+    },
+    [completePageTurn, currentPage, scrollMode, spreadMode, totalPages],
+  );
+
+  const handleNext = () => {
+    if (currentPage >= totalPages - (spreadMode ? 2 : 1)) return;
+    if (scrollMode) {
+      const next = currentPage + 1;
+      setCurrentPage(next);
+      handleJumpPage(next);
+    } else {
+      handleJumpPage(currentPage + (spreadMode ? 2 : 1));
+    }
+  };
+
+  const handlePrev = () => {
+    if (currentPage <= 0) return;
+    const prev = Math.max(0, currentPage - (spreadMode ? 2 : 1));
+    setCurrentPage(prev);
+    if (scrollMode) {
+      handleJumpPage(prev);
+    } else {
+      handleJumpPage(prev);
+    }
+  };
+
+  // Text selection & floating menu (Disabled in Double Page / Spread / Fullscreen mode)
+  const handleSelection = () => {
+    if (!scrollMode || spreadMode || fullscreen) {
+      window.getSelection?.()?.removeAllRanges?.();
+      if (floatingVisible) setFloatingVisible(false);
+      return;
+    }
+    const selection = window.getSelection();
+    if (!selection?.rangeCount) return;
+    const rawText = selection.toString();
+    const text = rawText.trim();
+    if (!text) {
+      if (floatingVisible && actionMode === "save") setFloatingVisible(false);
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    const startNode = (range.startContainer.nodeType === Node.TEXT_NODE
+      ? range.startContainer.parentElement
+      : range.startContainer).closest("[data-reader-page]");
+    const endNode = (range.endContainer.nodeType === Node.TEXT_NODE
+      ? range.endContainer.parentElement
+      : range.endContainer).closest("[data-reader-page]");
+
+    if (!startNode || !endNode) return;
+
+    const startPage = Number(startNode.dataset.readerPage);
+    const endPage = Number(endNode.dataset.readerPage);
+    const trimStart = rawText.length - rawText.trimStart().length;
+    const trimEnd = rawText.length - rawText.trimEnd().length;
+    const startOffset = textOffsetWithin(startNode, range.startContainer, range.startOffset) + trimStart;
+    const endOffset = textOffsetWithin(endNode, range.endContainer, range.endOffset) - trimEnd;
+
+    setSelectedText(text);
+    setSelectionData({ startPage, endPage, startOffset, endOffset });
+    setActionMode("save");
+
+    const rect = range.getBoundingClientRect();
+    setFloatingPos({
+      x: Math.max(12, Math.min(window.innerWidth - 160, rect.left + rect.width / 2 - 50)),
+      y: Math.max(12, rect.top - 50),
+    });
+    setFloatingVisible(true);
+  };
+
+  const handleHighlightClick = (noteId, text, clientX, clientY) => {
+    setSelectedHighlightId(noteId);
+    setSelectedText(text || "");
+    setActionMode("delete");
+    setFloatingPos({
+      x: Math.max(12, Math.min(window.innerWidth - 160, clientX - 50)),
+      y: Math.max(12, clientY - 50),
+    });
+    setFloatingVisible(true);
+  };
+
+  // Save note matching React Native structure
+  const handleSaveNote = () => {
+    if (!activeBook || !selectedText || !selectionData) return;
+    const noteId = Date.now().toString();
+    const highlightInfo = {
+      id: noteId,
+      title: noteTitle.trim() || "Note",
+      content: noteText.trim(),
+      ref: {
+        text: selectedText,
+        bookTitle: activeBook.title || "Unknown Book",
+        startPage: selectionData.startPage,
+        endPage: selectionData.endPage,
+        startOffset: selectionData.startOffset,
+        endOffset: selectionData.endOffset,
+        page: selectionData.startPage,
+        id: noteId,
+      },
+    };
+
+    setLibrary((current) => {
+      const existing = current.notes[activeBook.id] || [];
+      const updated = Array.isArray(existing)
+        ? [...existing, highlightInfo]
+        : Array.isArray(existing?.quotes)
+        ? { ...existing, quotes: [...existing.quotes, highlightInfo] }
+        : [highlightInfo];
+
+      return {
+        ...current,
+        notes: {
+          ...current.notes,
+          [activeBook.id]: updated,
+        },
+      };
+    });
+
+    setAddNoteModalVisible(false);
+    setFloatingVisible(false);
+    setNoteTitle("");
+    setNoteText("");
+    setSelectedText("");
+    setSelectionData(null);
+    window.getSelection()?.removeAllRanges();
+    setToast("নোট ও হাইলাইট সংরক্ষণ করা হয়েছে");
+  };
+
+  // Delete note
+  const handleDeleteNote = (note) => {
+    if (!activeBook) return;
+    const targetId = typeof note === "string" ? note : note?.id;
+    setLibrary((current) => {
+      const raw = current.notes[activeBook.id];
+      if (Array.isArray(raw)) {
+        return {
+          ...current,
+          notes: { ...current.notes, [activeBook.id]: raw.filter((n) => n.id !== targetId) },
+        };
+      }
+      if (Array.isArray(raw?.quotes)) {
+        return {
+          ...current,
+          notes: {
+            ...current.notes,
+            [activeBook.id]: {
+              ...raw,
+              quotes: raw.quotes.filter((n) => n.id !== targetId),
+            },
+          },
+        };
+      }
+      return current;
+    });
+    setFloatingVisible(false);
+    setSelectedHighlightId(null);
+    setToast("নোট মুছে ফেলা হয়েছে");
+  };
+
+  // Bookmark toggle
+  const toggleBookmark = () => {
+    if (!activeBook) return;
+    const exists = bookmarks.includes(currentPage);
+    setLibrary((current) => ({
+      ...current,
+      bookmarks: {
+        ...current.bookmarks,
+        [activeBook.id]: exists
+          ? bookmarks.filter((page) => page !== currentPage)
+          : [...bookmarks, currentPage].sort((a, b) => a - b),
+      },
+    }));
+    setToast(exists ? "বুকমার্ক সরানো হয়েছে" : "বুকমার্ক যোগ করা হয়েছে");
+  };
+
+  const removeBookmark = (page) => {
+    if (!activeBook) return;
+    setLibrary((current) => ({
+      ...current,
+      bookmarks: {
+        ...current.bookmarks,
+        [activeBook.id]: (current.bookmarks[activeBook.id] || []).filter((p) => p !== page),
+      },
+    }));
+    setToast("বুকমার্ক সরানো হয়েছে");
+  };
+
+  // Booklists
+  const createBooklist = (title) => {
+    if (!title.trim() || !activeBook) return;
+    const id = Date.now().toString();
+    setLibrary((current) => ({
+      ...current,
+      booklists: {
+        ...current.booklists,
+        [id]: { title: title.trim(), items: [activeBook.id] },
+      },
+    }));
+    setToast("বুকলিস্ট তৈরি হয়েছে এবং বইটি যোগ হয়েছে");
+  };
+
+  const toggleBookInList = (id) => {
+    if (!activeBook) return;
+    setLibrary((current) => {
+      const list = current.booklists[id];
+      if (!list) return current;
+      const contains = Array.isArray(list.items) && list.items.includes(activeBook.id);
+      return {
+        ...current,
+        booklists: {
+          ...current.booklists,
+          [id]: {
+            ...list,
+            items: contains ? list.items.filter((item) => item !== activeBook.id) : [...list.items, activeBook.id],
+          },
+        },
+      };
+    });
+  };
+
+  // Fullscreen & Rotated 2-Page Flipper Mode toggle (triggered on double-click / double-tap)
+  const toggleFullscreen = async () => {
+    const next = !fullscreen;
+    cancelPageTurn();
+    setPageTurn(null);
+    setFloatingVisible(false);
+    setSelectedText("");
+    setActionMode(null);
+    setFullscreen(next);
+
+    if (next) {
+      // Save previous portrait state (exact match to React Native prevReaderState.current)
+      prevReaderStateRef.current = {
+        scrollMode,
+        autoScroll,
+        fontSize,
+        currentPage: currentPageRef.current,
+        scrollY: lastScrollYRef.current,
+      };
+      baseFontSizeRef.current = fontSize;
+
+      // Switch to 2-Page Spread Flipper mode and rotate 90deg on portrait screens
+      setAutoScroll(false);
+      setScrollMode(false);
+      setSpreadMode(true);
+      setFontSize(Math.max(12, fontSize - 3));
+      setCurrentPage((prev) => Math.floor(prev / 2) * 2);
+
+      const isPortrait =
+        typeof window !== "undefined" && window.innerHeight > window.innerWidth;
+      setIsRotatedLandscape(isPortrait);
+
+      // Show the progress/exit overlay briefly upon entering fullscreen
+      setShowOverlay(true);
+      if (overlayTimerRef.current) clearTimeout(overlayTimerRef.current);
+      overlayTimerRef.current = setTimeout(() => {
+        setShowOverlay(false);
+        overlayTimerRef.current = null;
+      }, 5000);
+
+      try {
+        if (!document.fullscreenElement) {
+          await readerRootRef.current?.requestFullscreen?.();
+        }
+      } catch {
+        // Ignore on browsers that restrict requestFullscreen
+      }
+    } else {
+      // Return to Portrait Scroll Mode and restore previous state
+      setIsRotatedLandscape(false);
+      setShowOverlay(false);
+      setSpreadMode(false);
+      setScrollMode(true);
+      const prev = prevReaderStateRef.current;
+      setFontSize(prev?.fontSize || baseFontSizeRef.current || 16);
+      scrollRestoreRef.current = {
+        page: currentPageRef.current,
+        y: prev?.currentPage === currentPageRef.current ? prev?.scrollY : undefined,
+      };
+
+      try {
+        if (document.fullscreenElement) {
+          await document.exitFullscreen?.();
+        }
+      } catch {
+        // Ignore
+      }
+    }
+  };
+
+  useEffect(() => {
+    const handleResize = () => {
+      if (fullscreen) {
+        setIsRotatedLandscape(window.innerHeight > window.innerWidth);
+      }
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [fullscreen]);
+
+  // Keyboard navigation
+  useEffect(() => {
+    if (!activeBook) return undefined;
+    const handleKey = (e) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key === "ArrowRight") handleNext();
+      if (e.key === "ArrowLeft") handlePrev();
+      if (e.key === "Escape") {
+        setSidebarVisible(false);
+        setBooklistModalVisible(false);
+        setJumpModalVisible(false);
+        setSpeedModalVisible(false);
+        setAddNoteModalVisible(false);
+        setFloatingVisible(false);
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [activeBook, handleNext, handlePrev]);
+
+  // Import local book
   const addBook = (title, text) => {
     cancelPageTurn();
     setPageTurn(null);
@@ -549,9 +1351,8 @@ export default function ReaderApp() {
     setBooks((current) => [book, ...current]);
     setActiveBookId(book.id);
     setCurrentPage(0);
-    setScrollMode(false);
+    setScrollMode(true);
     setImportError("");
-    setPanel("");
     setToast("বইটি যোগ করা হয়েছে");
   };
 
@@ -594,229 +1395,6 @@ export default function ReaderApp() {
     }
   };
 
-  const goToPage = useCallback((index) => {
-    const target = Math.max(0, Math.min(Number(index) || 0, totalPages - 1));
-    if (target === currentPage || pageTurnRef.current) {
-      setPanel("");
-      return;
-    }
-    if (scrollMode) {
-      setCurrentPage(target);
-      const element = document.querySelector(`[data-reader-page="${target}"]`);
-      if (element && scrollRootRef.current) {
-        scrollRootRef.current.scrollTo({ top: element.offsetTop, behavior: "smooth" });
-      }
-    } else {
-      const step = spreadMode ? 2 : 1;
-      if (Math.abs(target - currentPage) === step) {
-        const turn = {
-          id: `${Date.now()}-${target}`,
-          from: currentPage,
-          target,
-          direction: target > currentPage ? "forward" : "backward",
-        };
-        pageTurnRef.current = turn;
-        setPageTurn(turn);
-        pageTurnTimerRef.current = setTimeout(() => {
-          completePageTurn();
-          setPageTurn(null);
-        }, 1000);
-      } else {
-        setCurrentPage(target);
-      }
-    }
-    setPanel("");
-  }, [completePageTurn, currentPage, scrollMode, spreadMode, totalPages]);
-
-  const goNext = useCallback(() => goToPage(currentPage + (spreadMode ? 2 : 1)), [currentPage, spreadMode, goToPage]);
-  const goPrevious = useCallback(() => goToPage(currentPage - (spreadMode ? 2 : 1)), [currentPage, spreadMode, goToPage]);
-
-  const handleSelection = () => {
-    const selection = window.getSelection();
-    if (!selection?.rangeCount) return;
-    const range = selection.getRangeAt(0);
-    const rawText = selection.toString();
-    const text = rawText.trim();
-    if (!text) return;
-    const startNode = (range.startContainer.nodeType === Node.TEXT_NODE
-      ? range.startContainer.parentElement
-      : range.startContainer).closest("[data-reader-page]");
-    const endNode = (range.endContainer.nodeType === Node.TEXT_NODE
-      ? range.endContainer.parentElement
-      : range.endContainer).closest("[data-reader-page]");
-    if (!startNode || !endNode) return;
-
-    const trimStart = rawText.length - rawText.trimStart().length;
-    const trimEnd = rawText.length - rawText.trimEnd().length;
-    const startPage = Number(startNode.dataset.readerPage);
-    const endPage = Number(endNode.dataset.readerPage);
-    const startOffset = textOffsetWithin(startNode, range.startContainer, range.startOffset) + trimStart;
-    const endOffset = textOffsetWithin(endNode, range.endContainer, range.endOffset) - trimEnd;
-    setSelectedText(text);
-    setSelectedPage(startPage);
-    setSelectionData({ startPage, endPage, startOffset, endOffset });
-    setSelectedHighlightId(null);
-    const rect = range.getBoundingClientRect();
-    setSelectionPoint({ x: Math.min(window.innerWidth - 160, Math.max(16, rect.left)), y: Math.max(72, rect.top - 52) });
-  };
-
-  const saveNote = (event) => {
-    event.preventDefault();
-    if (!activeBook || !selectedText || !selectionData) return;
-    const note = {
-      id: `${Date.now()}`,
-      title: noteTitle.trim() || "নোট",
-      content: noteContent.trim(),
-      ref: { text: selectedText, page: selectedPage, ...selectionData },
-    };
-    setLibrary((current) => ({
-      ...current,
-      notes: { ...current.notes, [activeBook.id]: [...(current.notes[activeBook.id] || []), note] },
-    }));
-    setPanel("");
-    setNoteTitle("");
-    setNoteContent("");
-    setSelectedText("");
-    setSelectionData(null);
-    setSelectionPoint(null);
-    window.getSelection()?.removeAllRanges();
-    setToast("নোট ও হাইলাইট সংরক্ষণ করা হয়েছে");
-  };
-
-  const removeNote = (noteId) => {
-    if (!activeBook) return;
-    setLibrary((current) => ({
-      ...current,
-      notes: { ...current.notes, [activeBook.id]: (current.notes[activeBook.id] || []).filter((note) => note.id !== noteId) },
-    }));
-    setSelectedHighlightId(null);
-    setSelectionPoint(null);
-  };
-
-  const toggleBookmark = () => {
-    if (!activeBook) return;
-    const exists = bookmarks.includes(currentPage);
-    setLibrary((current) => ({
-      ...current,
-      bookmarks: {
-        ...current.bookmarks,
-        [activeBook.id]: exists ? bookmarks.filter((page) => page !== currentPage) : [...bookmarks, currentPage].sort((a, b) => a - b),
-      },
-    }));
-    setToast(exists ? "বুকমার্ক সরানো হয়েছে" : "বুকমার্ক যোগ করা হয়েছে");
-  };
-
-  const toggleFullscreen = async () => {
-    const nextFullscreen = !fullscreen;
-    setFullscreen(nextFullscreen);
-    clearTimeout(controlsTimerRef.current);
-    setControlsVisible(false);
-    const isMobile = window.matchMedia("(max-width: 640px)").matches;
-    try {
-      if (nextFullscreen) {
-        if (isMobile) {
-          previousSpreadModeRef.current = spreadMode;
-          setSpreadMode(true);
-        }
-        await readerRootRef.current?.requestFullscreen?.();
-        if (isMobile && window.matchMedia("(orientation: portrait)").matches) {
-          const orientation = window.screen.orientation;
-          if (typeof orientation?.lock !== "function") throw new Error("Screen orientation lock is unavailable.");
-          await orientation.lock("landscape");
-          if (window.matchMedia("(orientation: portrait)").matches) {
-            throw new Error("The browser did not rotate to landscape.");
-          }
-        }
-      } else if (document.fullscreenElement) {
-        await document.exitFullscreen();
-      }
-    } catch (error) {
-      console.info("Using the reader's landscape full-screen layout because browser orientation/fullscreen locking is unavailable.", error);
-      if (isMobile && nextFullscreen && window.matchMedia("(orientation: portrait)").matches) {
-        usingCssFullscreenRef.current = true;
-        if (document.fullscreenElement) {
-          try {
-            await document.exitFullscreen();
-          } catch (exitError) {
-            console.warn("Could not leave browser fullscreen before applying the mobile layout.", exitError);
-          }
-        }
-      }
-    }
-    if (!nextFullscreen && previousSpreadModeRef.current !== null) {
-      usingCssFullscreenRef.current = false;
-      setSpreadMode(previousSpreadModeRef.current);
-      previousSpreadModeRef.current = null;
-      try {
-        window.screen.orientation?.unlock?.();
-      } catch (error) {
-        console.info("Could not unlock screen orientation.", error);
-      }
-    }
-  };
-
-  useEffect(() => {
-    const handleFullscreen = () => {
-      if (document.fullscreenElement) {
-        setFullscreen(true);
-        return;
-      }
-      if (usingCssFullscreenRef.current) return;
-      setFullscreen(false);
-      setControlsVisible(false);
-      clearTimeout(controlsTimerRef.current);
-      if (previousSpreadModeRef.current !== null) {
-        setSpreadMode(previousSpreadModeRef.current);
-        previousSpreadModeRef.current = null;
-      }
-      try {
-        window.screen.orientation?.unlock?.();
-      } catch (error) {
-        console.info("Could not unlock screen orientation.", error);
-      }
-    };
-    document.addEventListener("fullscreenchange", handleFullscreen);
-    return () => document.removeEventListener("fullscreenchange", handleFullscreen);
-  }, []);
-
-  useEffect(() => {
-    if (!activeBook) return undefined;
-    const handleKey = (event) => {
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
-      if (event.key === "ArrowRight") goNext();
-      if (event.key === "ArrowLeft") goPrevious();
-      if (event.key === "Escape") setPanel("");
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [activeBook, goNext, goPrevious]);
-
-  const createBooklist = (event) => {
-    event.preventDefault();
-    if (!listName.trim()) return;
-    const id = `${Date.now()}`;
-    setLibrary((current) => ({
-      ...current,
-      booklists: { ...current.booklists, [id]: { title: listName.trim(), items: [activeBook.id] } },
-    }));
-    setListName("");
-    setToast("বুকলিস্ট তৈরি হয়েছে এবং বইটি যোগ হয়েছে");
-  };
-
-  const toggleBookInList = (id) => {
-    setLibrary((current) => {
-      const list = current.booklists[id];
-      const contains = list.items.includes(activeBook.id);
-      return {
-        ...current,
-        booklists: {
-          ...current.booklists,
-          [id]: { ...list, items: contains ? list.items.filter((item) => item !== activeBook.id) : [...list.items, activeBook.id] },
-        },
-      };
-    });
-  };
-
   const exportLibrary = () => {
     try {
       const data = new Blob([JSON.stringify({ books: allBooks, library }, null, 2)], { type: "application/json" });
@@ -835,140 +1413,27 @@ export default function ReaderApp() {
     cancelPageTurn();
     setPageTurn(null);
     setAutoScroll(false);
-    setActiveBookId(null);
-    setPanel("");
-    setScrollMode(false);
-    setZoom(1);
-  };
-
-  if (!hydrated) return <main className="loading-screen">পাঠক প্রস্তুত হচ্ছে…</main>;
-
-  if (!activeBook) {
-    return (
-      <main className="library-screen">
-        <header className="landing-header">
-          <a href="#" className="brand" onClick={(event) => event.preventDefault()}>
-            <span className="brand-mark">গ</span>
-            <span>গল্পজল্প <small>পাঠক</small></span>
-          </a>
-          <button className="button button-quiet" onClick={exportLibrary}>Backup export</button>
-        </header>
-        <section className="welcome">
-          <div className="welcome-copy">
-            <span className="eyebrow">আপনার ব্যক্তিগত পাঠাগার</span>
-            <h1>প্রতিটি বইয়ের<br /><em>নিজস্ব একটা জগৎ।</em></h1>
-            <p>TXT বা Markdown বই খুলুন, পড়ার জায়গা সংরক্ষণ করুন, আর ভালো লাগা লাইনগুলো নোটে রাখুন।</p>
-            <div className="welcome-actions">
-              <button className="button button-primary" onClick={() => fileInputRef.current?.click()}><AppIcon>＋</AppIcon> বই আপলোড করুন</button>
-              <button className="button button-quiet" onClick={() => openBook(DEMO_BOOK.id)}>নমুনা বই পড়ুন <span>→</span></button>
-            </div>
-            <input ref={fileInputRef} className="visually-hidden" type="file" accept=".txt,.md,.text,text/plain,text/markdown" onChange={importFile} />
-          </div>
-          <div className="book-art" aria-hidden="true"><div className="art-sun" /><div className="art-river" /><div className="art-book"><span>গল্পজল্প</span><strong>পড়ার<br />গল্প</strong><small>একটি বই, অনেকগুলো পৃষ্ঠা</small></div></div>
-        </section>
-        <section className="library-content">
-          <div className="section-heading"><div><span className="eyebrow">শুরু করুন</span><h2>বইয়ের তাক</h2></div><span className="muted">{allBooks.length}টি বই</span></div>
-          {databaseLoading && <p className="muted database-status">Firebase-এর বই খোঁজা হচ্ছে…</p>}
-          {databaseError && <p className="error-banner" role="alert">{databaseError}</p>}
-          {importError && <p className="error-banner" role="alert">{importError}</p>}
-          {storageError && <p className="error-banner" role="alert">{storageError}</p>}
-          <form className="url-form" onSubmit={importUrl}>
-            <span aria-hidden="true">↗</span>
-            <input value={urlInput} onChange={(event) => setUrlInput(event.target.value)} placeholder="অথবা .txt / .md ফাইলের সরাসরি URL দিন" type="url" aria-label="Book URL" />
-            <button className="button button-quiet" disabled={urlLoading}>{urlLoading ? "আনা হচ্ছে…" : "URL থেকে খুলুন"}</button>
-          </form>
-          <div className="book-grid">
-            {allBooks.map((book, index) => {
-              const progress = library.history[book.id];
-              const percent = progress?.total ? Math.round(((progress.page + 1) / progress.total) * 100) : 0;
-              return (
-                <button className={`book-card book-tone-${index % 4}`} key={book.id} onClick={() => openBook(book.id)}>
-                  <span className="card-book" style={book.artwork ? { backgroundImage: `linear-gradient(180deg, #21190a40, #21190ac9), url("${book.artwork}")`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}>
-                    <span className="card-book-label">{book.title}</span>
-                    <span className="card-book-author">{book.author || "গল্পজল্প পাঠক"}</span>
-                  </span>
-                  <span className="card-meta">
-                    <strong>{book.title}</strong>
-                    <small>{progress ? `${percent}% পড়া হয়েছে` : book.text ? `${splitBook(book.text, book.title).pages.length} পৃষ্ঠা` : book.source === "firestore" ? book.writer || "অনলাইন বই" : "স্থানীয় বই"}</small>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-          {Object.keys(library.booklists).length > 0 && (
-            <div className="saved-lists"><h3>আপনার বুকলিস্ট</h3>{Object.values(library.booklists).map((list) => <span className="list-chip" key={list.title}>{list.title} · {list.items.length}</span>)}</div>
-          )}
-        </section>
-        <footer className="landing-footer"><span>আপনার পড়ার জায়গা ও নোট এই ব্রাউজারেই সংরক্ষিত থাকে।</span><button onClick={exportLibrary}>তথ্যের backup নিন</button></footer>
-      </main>
-    );
-  }
-
-  const visibleIndices = scrollMode
-    ? pages.map((_, index) => index)
-    : spreadMode
-      ? [currentPage, currentPage + 1].filter((index) => index < totalPages)
-      : [currentPage];
-
-  const handleHighlightClick = (noteId, x, y) => {
-    setSelectedHighlightId(noteId);
-    setSelectedText("");
-    setSelectionData(null);
-    setSelectionPoint({ x: Math.min(window.innerWidth - 160, Math.max(16, x)), y: Math.max(72, y - 52) });
-  };
-
-  const renderPage = (pageIndex, flipMode = false) => {
-    const pageText = pages[pageIndex] || "";
-    const htmlContent = renderBookHtml(pageText, activeBookFileUrl);
-    const paragraphs = htmlContent ? [] : pageText.split(/\n+/).filter((line) => line.trim());
-    const visibleText = paragraphs.join("");
-    const notesOnPage = bookNotes
-      .filter((note) => {
-        const startPage = note.ref?.startPage ?? note.ref?.page;
-        const endPage = note.ref?.endPage ?? note.ref?.page;
-        return Number.isInteger(startPage) && Number.isInteger(endPage) && pageIndex >= startPage && pageIndex <= endPage;
-      })
-      .map((note) => {
-        if (Number.isInteger(note.ref?.startOffset) && Number.isInteger(note.ref?.endOffset)) return note;
-        const startOffset = visibleText.indexOf(note.ref?.text || "");
-        return startOffset < 0 ? note : {
-          ...note,
-          ref: { ...note.ref, page: pageIndex, startPage: pageIndex, endPage: pageIndex, startOffset, endOffset: startOffset + note.ref.text.length },
-        };
-      });
-    let paragraphOffset = 0;
-    return (
-      <article
-        className={`reader-page${flipMode ? " flip-reader-page" : ""}`}
-        data-reader-page={pageIndex}
-        key={`${activeBook.id}-${pageIndex}`}
-        onMouseUp={handleSelection}
-        onKeyUp={handleSelection}
-        onTouchEnd={handleSelection}
-        style={{ backgroundColor: theme.page, color: theme.text, fontFamily, fontSize: `${fontSize}px` }}
-      >
-        <div className="page-content">
-          {htmlContent
-            ? <div className="book-html-content">{htmlContent}</div>
-            : paragraphs.length
-            ? paragraphs.map((paragraph, paragraphIndex) => {
-                const offset = paragraphOffset;
-                paragraphOffset += paragraph.length;
-                return (
-                  <p key={`${pageIndex}-${paragraphIndex}`}>
-                    {renderMarkdownParagraph(paragraph, notesOnPage, theme.highlight, pageIndex, offset, handleHighlightClick, activeBookFileUrl)}
-                  </p>
-                );
-              })
-            : <p className="empty-page">এই পৃষ্ঠাটি ফাঁকা।</p>}
-        </div>
-        <span className="page-number">{pageIndex + 1}</span>
-      </article>
-    );
+    setFullscreen(false);
+    setIsRotatedLandscape(false);
+    setSpreadMode(false);
+    setScrollMode(true);
+    setSidebarVisible(false);
+    setFloatingVisible(false);
+    try {
+      if (document.fullscreenElement) {
+        document.exitFullscreen?.();
+      }
+    } catch {
+      // ignore
+    }
+    if (onBack) {
+      onBack();
+    }
   };
 
   const handleScroll = () => {
     if (!scrollRootRef.current) return;
+    lastScrollYRef.current = scrollRootRef.current.scrollTop;
     const rootRect = scrollRootRef.current.getBoundingClientRect();
     let nearest = 0;
     let distance = Number.POSITIVE_INFINITY;
@@ -979,108 +1444,283 @@ export default function ReaderApp() {
         nearest = Number(element.dataset.readerPage);
       }
     });
-    setCurrentPage((current) => current === nearest ? current : nearest);
+    if (currentPage !== nearest) {
+      setCurrentPage(nearest);
+    }
   };
 
-  const panelTitle = {
-    chapters: "সূচিপত্র",
-    bookmarks: "বুকমার্ক",
-    notes: "নোট ও হাইলাইট",
-    booklists: "বুকলিস্ট",
-    jump: "পৃষ্ঠায় যান",
-    note: "নতুন নোট",
-  }[panel];
+  // Render Page Content
+  const renderPage = (pageIndex, flipMode = false) => {
+    const pageText = pages[pageIndex] || "";
+    const htmlBook = renderBookHtml(pageText, activeBookFileUrl);
+    const paragraphs = htmlBook ? [] : pageText.split(/\n+/).filter((line) => line.trim());
+    const visibleText = paragraphs.join("");
+
+    const notesOnPage = bookNotes
+      .filter((note) => {
+        const startPage = note.ref?.startPage ?? note.ref?.page;
+        const endPage = note.ref?.endPage ?? note.ref?.page;
+        return Number.isInteger(startPage) && Number.isInteger(endPage) && pageIndex >= startPage && pageIndex <= endPage;
+      })
+      .map((note) => {
+        if (Number.isInteger(note.ref?.startOffset) && Number.isInteger(note.ref?.endOffset)) return note;
+        const startOffset = visibleText.indexOf(note.ref?.text || "");
+        return startOffset < 0
+          ? note
+          : {
+              ...note,
+              ref: {
+                ...note.ref,
+                page: pageIndex,
+                startPage: pageIndex,
+                endPage: pageIndex,
+                startOffset,
+                endOffset: startOffset + (note.ref?.text?.length || 0),
+              },
+            };
+      });
+
+    let paragraphOffset = 0;
+    return (
+      <article
+        className={`reader-page${flipMode ? " flip-reader-page" : ""}${pageIndex === 0 ? " cover-page" : ""}`}
+        data-reader-page={pageIndex}
+        key={`${activeBook.id}-${pageIndex}`}
+        onMouseUp={handleSelection}
+        onTouchEnd={handleSelection}
+        style={{
+          backgroundColor: theme.page,
+          color: theme.text,
+          fontFamily,
+          fontSize: `${fontSize}px`,
+        }}
+      >
+        <div className="page-content">
+          {htmlBook ? (
+            <div className="book-html-content">{htmlBook}</div>
+          ) : paragraphs.length ? (
+            paragraphs.map((paragraph, paragraphIndex) => {
+              const offset = paragraphOffset;
+              paragraphOffset += paragraph.length;
+              const trimmedLine = paragraph.trim();
+
+              // Markdown horizontal rule (--- or ***)
+              if (/^(?:---+|\*\*\*+|___+)$/.test(trimmedLine)) {
+                return <hr key={`${pageIndex}-${paragraphIndex}`} className="reader-hr" />;
+              }
+
+              // Markdown H1 .. H6 headings (# .. ######)
+              const headingMatch = trimmedLine.match(/^(#{1,6})\s+(.*)$/);
+              if (headingMatch) {
+                const level = Math.min(6, headingMatch[1].length);
+                const headingText = headingMatch[2]
+                  .replace(/\*\*(.*?)\*\*/g, "$1")
+                  .replace(/__(.*?)__/g, "$1")
+                  .trim();
+                const Tag = `h${level}`;
+                return (
+                  <Tag key={`${pageIndex}-${paragraphIndex}`} className={`reader-md-h${level}`}>
+                    {headingText}
+                  </Tag>
+                );
+              }
+
+              const cleanParagraph = paragraph
+                .replace(/\*\*(.*?)\*\*/g, "$1")
+                .replace(/__(.*?)__/g, "$1");
+
+              return (
+                <p key={`${pageIndex}-${paragraphIndex}`}>
+                  {renderMarkdownParagraph(
+                    cleanParagraph,
+                    notesOnPage,
+                    theme.highlight,
+                    pageIndex,
+                    offset,
+                    handleHighlightClick,
+                    activeBookFileUrl,
+                  )}
+                </p>
+              );
+            })
+          ) : (
+            <p className="empty-page">এই পৃষ্ঠাটি ফাঁকা।</p>
+          )}
+        </div>
+        <span className="page-number">{pageIndex + 1}</span>
+      </article>
+    );
+  };
+
+  // If not hydrated yet
+  if (!hydrated) {
+    return (
+      <main className="reader-app" style={{ "--reader-bg": "#e0d5c1" }}>
+        <BookLoader visible={true} />
+      </main>
+    );
+  }
+
+  // Active Reader View
+  const isBookmarked = bookmarks.includes(currentPage);
 
   return (
-    <main ref={readerRootRef} className={`reader-app${fullscreen ? " is-fullscreen" : ""}${controlsVisible ? " controls-visible" : ""}`} style={{ "--reader-bg": theme.background, "--reader-page": theme.page, "--reader-text": theme.text, "--reader-highlight": theme.highlight }}>
-      <header className="reader-header">
-        <button className="back-button" onClick={closeReader} aria-label="Back to library"><span>←</span><span className="back-label">পাঠাগার</span></button>
-        <div className="reader-title"><strong>{activeBook.title}</strong><span>{parsed.chapters.filter((chapter) => chapter.pageIndex <= currentPage).at(-1)?.title || "পড়া চলছে"}</span></div>
-        <div className="reader-tools">
-          <button className="tool-button zoom-button" onClick={() => setZoom((value) => Math.max(1, Number((value - 0.1).toFixed(1))))} aria-label="Zoom out">−</button>
-          <span className="font-size-value zoom-value">{Math.round(zoom * 100)}%</span>
-          <button className="tool-button zoom-button" onClick={() => setZoom((value) => Math.min(2, Number((value + 0.1).toFixed(1))))} aria-label="Zoom in">＋</button>
-          <button className="tool-button" onClick={() => setFontSize((size) => Math.max(12, size - 1))} aria-label="Decrease font size">A−</button>
-          <span className="font-size-value">{fontSize}</span>
-          <button className="tool-button" onClick={() => setFontSize((size) => Math.min(32, size + 1))} aria-label="Increase font size">A＋</button>
-          <select className="font-select" value={fontFamily} onChange={(event) => setFontFamily(event.target.value)} aria-label="Font family">
-            {FONTS.map(([name, value]) => <option value={value} key={name}>{name}</option>)}
-          </select>
-          <button className="tool-button theme-button" onClick={() => setThemeIndex((index) => (index + 1) % THEMES.length)} title="থিম বদলান"><span className={`theme-dot theme-${themeIndex}`} />{theme.name}</button>
-          <button className={`tool-button${fullscreen ? " active" : ""}`} onClick={toggleFullscreen} title="Fullscreen"><AppIcon>⛶</AppIcon></button>
-        </div>
-      </header>
+    <main
+      ref={readerRootRef}
+      className={`reader-app${fullscreen ? " is-fullscreen" : ""}${
+        fullscreen && isRotatedLandscape ? " is-rotated-landscape" : ""
+      }${flickering ? " flicker-effect" : ""}`}
+      style={{
+        "--reader-bg": theme.background,
+        "--reader-page": theme.page,
+        "--reader-text": theme.text,
+        "--reader-highlight": theme.highlight,
+      }}
+      onTouchStart={(e) => {
+        if (e.touches.length === 2) {
+          isTwoFingerRef.current = true;
+          hasTriggeredThemeRef.current = false;
+          touchStartYRef.current = (e.touches[0].pageY + e.touches[1].pageY) / 2;
+        }
+      }}
+      onTouchMove={(e) => {
+        if (isTwoFingerRef.current && e.touches.length === 2 && !hasTriggeredThemeRef.current) {
+          const currentY = (e.touches[0].pageY + e.touches[1].pageY) / 2;
+          const diffY = currentY - touchStartYRef.current;
+          if (Math.abs(diffY) > 80) {
+            hasTriggeredThemeRef.current = true;
+            toggleTheme();
+          }
+        }
+      }}
+      onTouchEnd={() => {
+        isTwoFingerRef.current = false;
+        hasTriggeredThemeRef.current = false;
+      }}
+    >
+      {/* ========================================= */}
+      {/* 1. HEADER (matching React Native Header)   */}
+      {/* ========================================= */}
+      {!fullscreen && (
+        <header className="reader-header">
+          {/* Back Button */}
+          <button
+            type="button"
+            className="reader-header-icon-btn"
+            onClick={closeReader}
+            title="Back to library"
+            aria-label="Back to library"
+          >
+            <ArrowBackIcon size={24} color="#3b2f1b" />
+          </button>
 
-      <div className="reader-body">
-        <aside className="reader-rail">
-          <div className="rail-actions">
-            <button onClick={() => setPanel("chapters")} title="সূচিপত্র"><AppIcon>☷</AppIcon><span>সূচি</span></button>
-            <button onClick={() => setPanel("bookmarks")} title="বুকমার্ক"><AppIcon>♧</AppIcon><span>চিহ্ন</span></button>
-            <button onClick={() => setPanel("notes")} title="নোট"><AppIcon>▤</AppIcon><span>নোট</span><small>{bookNotes.length || ""}</small></button>
-            <button onClick={() => setPanel("booklists")} title="বুকলিস্ট"><AppIcon>＋</AppIcon><span>তালিকা</span></button>
+          {/* Compact Settings Bar (Speed, FontSelector, AutoScroll Switch) */}
+          <div className="compact-settings">
+            {/* Speed Badge Button -> opens SpeedModal */}
+            <button
+              type="button"
+              className="speed-badge-btn"
+              onClick={() => setSpeedModalVisible(true)}
+              title="Change auto-scroll speed"
+            >
+              {speedX}x
+            </button>
+
+            {/* Font Selector */}
+            <FontSelector
+              selectedFont={selectedFontName}
+              onSelect={(name, family) => {
+                setSelectedFontName(name);
+                setFontFamily(family);
+              }}
+            />
+
+            {/* AutoScroll Switch */}
+            <div className="switch-container" title="Auto Scroll Toggle">
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={autoScroll}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    if (checked && !scrollMode) {
+                      setScrollMode(true);
+                    }
+                    setAutoScroll(checked);
+                  }}
+                  aria-label="Toggle auto-scroll"
+                />
+                <span className="switch-slider round" />
+              </label>
+            </div>
           </div>
-          <div className="rail-bottom"><span className="progress-mini">{Math.round(((currentPage + 1) / Math.max(totalPages, 1)) * 100)}%</span><span>পড়া</span></div>
-        </aside>
 
-        <section className={`reader-stage${scrollMode ? " scroll-mode" : " page-mode"}${spreadMode && !scrollMode ? " spread-mode" : ""}`} onDoubleClick={() => {
-          if (Date.now() - lastTouchToggleAtRef.current > 700) toggleFullscreen();
-        }} onTouchStart={(event) => {
-          if (event.touches.length === 2) {
-            touchStartRef.current = null;
-            lastTouchTapRef.current = null;
-            const [first, second] = event.touches;
-            pinchDistanceRef.current = Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY);
-          } else if (event.touches.length === 1) {
-            const touch = event.touches[0];
-            touchStartRef.current = { x: touch.clientX, y: touch.clientY, at: Date.now() };
-          }
-        }} onTouchMove={(event) => {
-          if (event.touches.length !== 2 || !pinchDistanceRef.current) return;
-          const [first, second] = event.touches;
-          const distance = Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY);
-          if (Math.abs(distance - pinchDistanceRef.current) > 36) {
-            setZoom((value) => Math.min(2, Math.max(1, Number((value + (distance > pinchDistanceRef.current ? 0.1 : -0.1)).toFixed(1)))));
-            pinchDistanceRef.current = distance;
-          }
-        }} onTouchEnd={(event) => {
-          pinchDistanceRef.current = 0;
-          const start = touchStartRef.current;
-          const touch = event.changedTouches[0];
-          touchStartRef.current = null;
-          if (!start || !touch) return;
-          const deltaX = touch.clientX - start.x;
-          const deltaY = touch.clientY - start.y;
-          const duration = Date.now() - start.at;
-          if (duration <= 350 && Math.abs(deltaX) < 12 && Math.abs(deltaY) < 12) {
-            const previousTap = lastTouchTapRef.current;
-            const isDoubleTap = previousTap
-              && Date.now() - previousTap.at <= 350
-              && Math.hypot(touch.clientX - previousTap.x, touch.clientY - previousTap.y) < 40;
-            if (isDoubleTap) {
-              lastTouchTapRef.current = null;
-              lastTouchToggleAtRef.current = Date.now();
-              toggleFullscreen();
-              return;
+          {/* Menu Button -> opens ChapterSidebar */}
+          <button
+            type="button"
+            className="reader-header-icon-btn"
+            onClick={() => {
+              setSidebarTab("chapters");
+              setSidebarVisible(true);
+            }}
+            title="সূচিপত্র ও মেনু"
+            aria-label="Menu"
+          >
+            <MenuIcon size={24} color="#3b2f1b" />
+          </button>
+        </header>
+      )}
+
+      {/* ========================================= */}
+      {/* 2. READER STAGE (Content & Gestures)       */}
+      {/* ========================================= */}
+      <div className="reader-body">
+        <section
+          className={`reader-stage${scrollMode ? " scroll-mode" : " page-mode"}${spreadMode && !scrollMode ? " spread-mode" : ""}`}
+          onCopy={(e) => {
+            if (!scrollMode || spreadMode || fullscreen) {
+              e.preventDefault();
             }
-            lastTouchTapRef.current = { x: touch.clientX, y: touch.clientY, at: Date.now() };
-            if (fullscreen) revealFullscreenControls();
-          } else {
-            lastTouchTapRef.current = null;
-          }
-          if (fullscreen) return;
-          if (scrollMode || zoom !== 1) return;
-          if (Math.abs(deltaX) > 70 && Math.abs(deltaX) > Math.abs(deltaY) * 1.3) {
-            if (deltaX < 0) goNext();
-            else goPrevious();
-          }
-        }} onTouchCancel={() => {
-          touchStartRef.current = null;
-          pinchDistanceRef.current = 0;
-          lastTouchTapRef.current = null;
-        }}>
-          {activeBookLoading ? <div className="reader-load-state" role="status">বইয়ের পৃষ্ঠা আনা হচ্ছে…</div> : activeBookError ? <div className="reader-load-state error-text" role="alert">{activeBookError}</div> : scrollMode ? (
+          }}
+          onCut={(e) => {
+            if (!scrollMode || spreadMode || fullscreen) {
+              e.preventDefault();
+            }
+          }}
+          onContextMenu={(e) => {
+            if (!scrollMode || spreadMode || fullscreen) {
+              e.preventDefault();
+            }
+          }}
+          onClick={() => {
+            const now = Date.now();
+            if (now - lastTapRef.current < 320) {
+              // Double Tap / Double Click: Rotated 2-Page Spread Fullscreen toggle
+              window.getSelection?.()?.removeAllRanges?.();
+              toggleFullscreen();
+            } else {
+              // Single Tap: If in fullscreen, show overlay
+              if (fullscreen) {
+                triggerOverlay();
+              }
+              if (floatingVisible) {
+                setFloatingVisible(false);
+              }
+            }
+            lastTapRef.current = now;
+          }}
+        >
+          {activeBookLoading ? (
+            <BookLoader visible={true} />
+          ) : activeBookError ? (
+            <div className="reader-load-state error-text" role="alert">
+              {activeBookError}
+            </div>
+          ) : scrollMode ? (
             <div className="reader-scroll" ref={scrollRootRef} onScroll={handleScroll}>
-              <div className="pages-wrap" style={{ zoom }}>{visibleIndices.map((pageIndex) => renderPage(pageIndex))}</div>
+              <div className="pages-wrap">
+                {pages.map((_, index) => renderPage(index))}
+              </div>
             </div>
           ) : pages.length ? (
             <PageTurn
@@ -1089,63 +1729,262 @@ export default function ReaderApp() {
               renderPage={(pageIndex) => renderPage(pageIndex, true)}
               spreadMode={spreadMode}
               currentPage={currentPage}
-              zoom={zoom}
+              zoom={1}
               turn={pageTurn}
+              isRotated90={fullscreen && isRotatedLandscape}
+              onTurnPage={(targetPage) => {
+                setCurrentPage(targetPage);
+              }}
+              onSingleTap={() => {
+                if (fullscreen) {
+                  triggerOverlay();
+                }
+                if (floatingVisible) {
+                  setFloatingVisible(false);
+                }
+              }}
+              onDoubleTap={() => {
+                toggleFullscreen();
+              }}
               onTurnComplete={() => {
                 completePageTurn();
                 setPageTurn(null);
               }}
             />
-          ) : <div className="reader-load-state">এই বইয়ে পড়ার মতো কোনো পৃষ্ঠা নেই।</div>}
-          {!scrollMode && pages.length > 0 && !activeBookLoading && !activeBookError && <button className="page-arrow page-arrow-left" onClick={goPrevious} disabled={currentPage <= 0} aria-label="Previous page">‹</button>}
-          {!scrollMode && pages.length > 0 && !activeBookLoading && !activeBookError && <button className="page-arrow page-arrow-right" onClick={goNext} disabled={currentPage >= totalPages - (spreadMode ? 2 : 1)} aria-label="Next page">›</button>}
-          {selectionPoint && selectedText && <div className="selection-action" style={{ left: selectionPoint.x, top: selectionPoint.y }}><button onMouseDown={(event) => event.preventDefault()} onClick={() => { setPanel("note"); setSelectionPoint(null); }}>✎ নোট যোগ করুন</button><button onClick={() => { setSelectedText(""); setSelectionData(null); setSelectionPoint(null); window.getSelection()?.removeAllRanges(); }}>×</button></div>}
-          {selectionPoint && selectedHighlightId && <div className="selection-action" style={{ left: selectionPoint.x, top: selectionPoint.y }}><button onMouseDown={(event) => event.preventDefault()} onClick={() => removeNote(selectedHighlightId)}>নোট ও হাইলাইট মুছুন</button><button onClick={() => { setSelectedHighlightId(null); setSelectionPoint(null); }}>×</button></div>}
-          {scrollMode && autoScroll && <span className="auto-scroll-indicator">অটোস্ক্রল চলছে</span>}
+          ) : (
+            <div className="reader-load-state">এই বইয়ে পড়ার মতো কোনো পৃষ্ঠা নেই।</div>
+          )}
+
+          {/* Floating Context Menu (matching React Native contextMenu) */}
+          {floatingVisible && (
+            <div
+              className="floating-context-menu"
+              style={{
+                left: `${floatingPos.x}px`,
+                top: `${floatingPos.y}px`,
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {actionMode === "save" && (
+                <button
+                  type="button"
+                  className="floating-menu-btn"
+                  onClick={() => {
+                    setFloatingVisible(false);
+                    setAddNoteModalVisible(true);
+                  }}
+                >
+                  Note
+                </button>
+              )}
+
+              {actionMode === "delete" && (
+                <button
+                  type="button"
+                  className="floating-menu-btn delete"
+                  onClick={() => {
+                    handleDeleteNote(selectedHighlightId);
+                  }}
+                >
+                  Delete
+                </button>
+              )}
+
+              <button
+                type="button"
+                className="floating-menu-btn cancel"
+                onClick={() => setFloatingVisible(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
+          {/* Landscape / Fullscreen Overlay (matching React Native LandscapeOverlay) */}
+          {fullscreen && (
+            <LandscapeOverlay
+              showOverlay={showOverlay}
+              zoomActive={false}
+              currentLeafIndex={currentLeafIndex}
+              totalLeaves={totalLeaves}
+              currentPage={currentPage}
+              pages={pages}
+              isRotated90={fullscreen && isRotatedLandscape}
+              onExitFullscreen={toggleFullscreen}
+              onLeafChange={(leafIndex) => {
+                const target = leafIndex * 2;
+                setCurrentPage(Math.max(0, Math.min(target, totalPages - 1)));
+              }}
+              resetOverlayTimer={resetOverlayTimer}
+            />
+          )}
         </section>
       </div>
 
-      <footer className="reader-footer">
-        <div className="footer-left">
-          <button className={`footer-button${scrollMode ? " selected" : ""}`} onClick={() => { cancelPageTurn(); setPageTurn(null); setScrollMode((mode) => !mode); setAutoScroll(false); }}>↕ <span>স্ক্রল</span></button>
-          <button className={`footer-button${spreadMode ? " selected" : ""}`} onClick={() => { cancelPageTurn(); setPageTurn(null); setSpreadMode((mode) => !mode); setScrollMode(false); setAutoScroll(false); }}>▤ <span>দুই পৃষ্ঠা</span></button>
-          <button className={`footer-button${autoScroll ? " selected" : ""}`} onClick={() => { if (!scrollMode) { cancelPageTurn(); setPageTurn(null); setScrollMode(true); } setAutoScroll((enabled) => !enabled); }}>▷ <span>অটোস্ক্রল</span></button>
-          {autoScroll && <label className="speed-control"><span>গতি {speed.toFixed(1)}×</span><input type="range" min="0.5" max="2" step="0.1" value={speed} onChange={(event) => setSpeed(Number(event.target.value))} aria-label="Auto-scroll speed" /></label>}
-        </div>
-        <div className="page-controls">
-          <button onClick={goPrevious} disabled={currentPage <= 0} aria-label="Previous page">←</button>
-          <button className="page-count" onClick={() => { setPanel("jump"); setJumpInput(String(currentPage + 1)); }}>{pageLabel}</button>
-          <button onClick={goNext} disabled={currentPage >= totalPages - (spreadMode ? 2 : 1)} aria-label="Next page">→</button>
-          <input className="progress-range" type="range" min="1" max={Math.max(totalPages, 1)} value={currentPage + 1} onChange={(event) => goToPage(Number(event.target.value) - 1)} aria-label="Reading progress" />
-        </div>
-        <div className="footer-right">
-          <button className={`footer-button${bookmarks.includes(currentPage) ? " selected" : ""}`} onClick={toggleBookmark}>{bookmarks.includes(currentPage) ? "◆" : "◇"} <span>বুকমার্ক</span></button>
-          <button className="footer-button" onClick={() => setPanel("notes")}>▤ <span>নোটসমূহ</span></button>
-        </div>
-      </footer>
+      {/* ========================================= */}
+      {/* 3. FOOTER (matching React Native Footer)   */}
+      {/* ========================================= */}
+      {!fullscreen && (
+        <footer className="reader-footer">
+          {/* Left group: Prev + Page Indicator */}
+          <div className="reader-footer-left-group">
+            <button
+              type="button"
+              className="footer-icon-btn"
+              onClick={handlePrev}
+              disabled={currentPage <= 0}
+              title="Previous Page"
+              aria-label="Previous Page"
+            >
+              <ChevronBackIcon size={24} color={currentPage <= 0 ? "#ccc" : "#3b2f1b"} />
+            </button>
 
-      {storageError && <div className="storage-warning" role="alert">{storageError}</div>}
-      {toast && <div className="toast" role="status">{toast}</div>}
+            <button
+              type="button"
+              className="footer-page-btn"
+              onClick={() => setJumpModalVisible(true)}
+              title="Go To Page"
+            >
+              {currentPage + 1} / {totalPages}
+            </button>
+          </div>
 
-      {panel && (
-        <div className={`panel-scrim${panel === "note" || panel === "jump" ? " centered" : ""}`} onMouseDown={(event) => { if (event.target === event.currentTarget) setPanel(""); }}>
-          <section className={`reader-panel${panel === "note" || panel === "jump" ? " dialog-panel" : ""}`} role="dialog" aria-modal="true" aria-label={panelTitle}>
-            <div className="panel-heading"><div><span className="eyebrow">গল্পজল্প পাঠক</span><h2>{panelTitle}</h2></div><button className="close-button" onClick={() => setPanel("")} aria-label="Close">×</button></div>
+          {/* 1. View Saved Notes List Button */}
+          <button
+            type="button"
+            className="footer-icon-btn"
+            onClick={() => {
+              setSidebarTab("notes");
+              setSidebarVisible(true);
+            }}
+            title="নোটসমূহ"
+            aria-label="View Saved Notes"
+          >
+            <DocumentTextIcon size={22} color="#3b2f1b" />
+          </button>
 
-            {panel === "chapters" && <div className="panel-list">{parsed.chapters.map((chapter, index) => <button className="panel-row" key={`${chapter.pageIndex}-${chapter.title}`} onClick={() => goToPage(chapter.pageIndex)}><span className="row-index">{String(index + 1).padStart(2, "0")}</span><span>{chapter.title}</span><small>পৃষ্ঠা {chapter.pageIndex + 1}</small></button>)}</div>}
+          {/* 2. View Bookmarks List Button */}
+          <button
+            type="button"
+            className="footer-icon-btn"
+            onClick={() => {
+              setSidebarTab("bookmarks");
+              setSidebarVisible(true);
+            }}
+            title="বুকমার্কস"
+            aria-label="View Bookmarks"
+          >
+            <BookmarksOutlineIcon size={22} color="#3b2f1b" />
+          </button>
 
-            {panel === "bookmarks" && <div className="panel-list">{bookmarks.length ? bookmarks.map((page) => <div className="panel-row" key={page}><button className="row-main" onClick={() => goToPage(page)}><span className="row-index">◆</span><span>পৃষ্ঠা {page + 1}</span><small>{parsed.chapters.find((chapter) => chapter.pageIndex <= page)?.title || activeBook.title}</small></button><button className="row-delete" onClick={() => setLibrary((current) => ({ ...current, bookmarks: { ...current.bookmarks, [activeBook.id]: bookmarks.filter((item) => item !== page) } }))} aria-label="Remove bookmark">×</button></div>) : <p className="empty-state">এখনও কোনো বুকমার্ক নেই।</p>}</div>}
+          {/* 3. Bookmark Current Page Toggle Button */}
+          <button
+            type="button"
+            className="footer-icon-btn"
+            onClick={toggleBookmark}
+            title={isBookmarked ? "বুকমার্ক সরানো" : "বুকমার্ক যোগ করা"}
+            aria-label="Toggle Bookmark"
+          >
+            {isBookmarked ? (
+              <BookmarkFilledIcon size={22} color="#6b4f2d" />
+            ) : (
+              <BookmarkOutlineIcon size={22} color="#6b4f2d" />
+            )}
+          </button>
 
-            {panel === "notes" && <div className="panel-list">{bookNotes.length ? bookNotes.map((note) => <div className="note-card" key={note.id}><button className="note-open" onClick={() => goToPage(note.ref.page)}><strong>{note.title || "নোট"}</strong><span className="note-quote">“{note.ref.text}”</span>{note.content && <span>{note.content}</span>}<small>পৃষ্ঠা {note.ref.page + 1}</small></button><button className="row-delete" onClick={() => removeNote(note.id)} aria-label="Delete note">×</button></div>) : <p className="empty-state">পড়ার সময় কোনো লাইন নির্বাচন করে নোট যোগ করতে পারবেন।</p>}</div>}
+          {/* 4. Add to Booklist Button */}
+          <button
+            type="button"
+            className="footer-icon-btn"
+            onClick={() => setBooklistModalVisible(true)}
+            title="বুকলিস্টে যোগ করুন"
+            aria-label="Add to Booklist"
+          >
+            <AddCircleOutlineIcon size={22} color="#3b2f1b" />
+          </button>
 
-            {panel === "booklists" && <div className="panel-list"><form className="create-list-form" onSubmit={createBooklist}><input value={listName} onChange={(event) => setListName(event.target.value)} placeholder="নতুন বুকলিস্টের নাম" aria-label="New booklist name" /><button className="button button-primary" type="submit">তৈরি</button></form>{Object.entries(library.booklists).map(([id, list]) => <div className="panel-row" key={id}><span>{list.title}</span><button className="list-toggle" onClick={() => toggleBookInList(id)}>{list.items.includes(activeBook.id) ? "✓ যোগ করা" : "+ বই যোগ"}</button></div>)}</div>}
-
-            {panel === "jump" && <form className="jump-form" onSubmit={(event) => { event.preventDefault(); goToPage(Number(jumpInput) - 1); }}><p>মোট {totalPages}টি পৃষ্ঠা</p><label htmlFor="jump-page">পৃষ্ঠা নম্বর</label><input id="jump-page" type="number" min="1" max={totalPages} value={jumpInput} onChange={(event) => setJumpInput(event.target.value)} autoFocus /><button className="button button-primary" type="submit">যান</button></form>}
-
-            {panel === "note" && <form className="note-form" onSubmit={saveNote}><label htmlFor="note-title">শিরোনাম (ঐচ্ছিক)</label><input id="note-title" value={noteTitle} onChange={(event) => setNoteTitle(event.target.value)} placeholder="নোটের শিরোনাম" /><div className="quote-preview">“{selectedText}”<small>পৃষ্ঠা {selectedPage + 1}</small></div><label htmlFor="note-content">আপনার নোট</label><textarea id="note-content" value={noteContent} onChange={(event) => setNoteContent(event.target.value)} placeholder="এই লাইনটি কেন ভালো লাগল?" rows="4" /><div className="dialog-actions"><button type="button" className="button button-quiet" onClick={() => setPanel("")}>বাতিল</button><button className="button button-primary" type="submit">নোট সংরক্ষণ</button></div></form>}
-          </section>
-        </div>
+          {/* 5. Next Page Button (on the far right matching React Native footer) */}
+          <button
+            type="button"
+            className="footer-icon-btn"
+            onClick={handleNext}
+            disabled={currentPage >= totalPages - (spreadMode ? 2 : 1)}
+            title="Next Page"
+            aria-label="Next Page"
+          >
+            <ChevronForwardIcon
+              size={24}
+              color={currentPage >= totalPages - (spreadMode ? 2 : 1) ? "#ccc" : "#3b2f1b"}
+            />
+          </button>
+        </footer>
       )}
+
+      {/* ========================================= */}
+      {/* 4. MODALS & OVERLAYS                      */}
+      {/* ========================================= */}
+
+      {/* Speed Modal (matching SpeedModal.jsx) */}
+      <SpeedModal
+        visible={speedModalVisible}
+        speedX={speedX}
+        setSpeedX={setSpeedX}
+        setAutoScrollSpeed={setAutoScrollSpeed}
+        onClose={() => setSpeedModalVisible(false)}
+      />
+
+      {/* Jump Page Modal (matching JumpPageModal.jsx) */}
+      <JumpPageModal
+        visible={jumpModalVisible}
+        onClose={() => setJumpModalVisible(false)}
+        pagesLength={totalPages}
+        onJump={handleJumpPage}
+      />
+
+      {/* Add Note Modal (matching AddNoteModal.jsx) */}
+      <AddNoteModal
+        visible={addNoteModalVisible}
+        noteTitle={noteTitle}
+        setNoteTitle={setNoteTitle}
+        noteText={noteText}
+        setNoteText={setNoteText}
+        selectedText={selectedText}
+        onSave={handleSaveNote}
+        onCancel={() => {
+          setAddNoteModalVisible(false);
+          setNoteTitle("");
+          setNoteText("");
+          setSelectedText("");
+          setSelectionData(null);
+        }}
+      />
+
+      {/* Chapter Sidebar: Chapters, Bookmarks, Notes (matching ChapterSidebar.jsx) */}
+      <ChapterSidebar
+        visible={sidebarVisible}
+        activeTab={sidebarTab}
+        setActiveTab={setSidebarTab}
+        onClose={() => setSidebarVisible(false)}
+        chapters={parsed.chapters}
+        bookmarks={bookmarks}
+        notes={bookNotes}
+        jumpToPage={handleJumpPage}
+        onDeleteNote={handleDeleteNote}
+        onRemoveBookmark={removeBookmark}
+      />
+
+      {/* Booklist Modal (matching BooklistModal.jsx) */}
+      <BooklistModal
+        visible={booklistModalVisible}
+        onClose={() => setBooklistModalVisible(false)}
+        booklists={library.booklists}
+        bookId={activeBook.id}
+        onCreateBooklist={createBooklist}
+        onToggleBooklist={toggleBookInList}
+      />
+
+      {/* Toast notification */}
+      {toast && <div className="toast">{toast}</div>}
     </main>
   );
 }

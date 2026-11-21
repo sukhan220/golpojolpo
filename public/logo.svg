@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 200" fill="none">
+  <!-- বইয়ের বাম ও উপরের অংশ -->
+  <path d="M 127 50 
+       C 98 30, 62 30, 38 48 
+       L 38 148 
+       C 66 148, 94 156, 120 172 
+       C 146 156, 174 148, 202 148 
+       L 202 52 
+       C 178 34, 146 36, 133 56" stroke="#383838" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round" />
+  
+  <!-- ভেতরের সাউন্ড ওয়েভ এবং মাঝের বাঁক -->
+  <path d="M 38 112 
+       C 48 113, 55 110, 61 106 
+       C 65 103, 68 118, 72 118 
+       C 76 118, 79 101, 83 101 
+       C 87 101, 90 124, 93 124 
+       C 96 124, 100 88, 103 88 
+       C 106 88, 108 131, 112 131 
+       C 117 131, 125 85, 133 56" stroke="#383838" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round" />
+</svg>

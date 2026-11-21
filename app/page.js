@@ -1,10 +1,10 @@
-import ReaderApp from "./reader";
+import GolpoJolpoApp from "../components/GolpoJolpoApp";
 
 export const metadata = {
-  title: "গল্পজল্প পাঠক",
-  description: "বই পড়ুন, বুকমার্ক রাখুন এবং নিজের নোট সংরক্ষণ করুন।",
+  title: "গল্প জল্প",
+  description: "বাংলা অডিওবুক, ই-বুক ও লাইব্রেরি।",
 };
 
 export default function Home() {
-  return <ReaderApp />;
+  return <GolpoJolpoApp />;
 }
