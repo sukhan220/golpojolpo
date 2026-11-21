@@ -4,14 +4,19 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "prisma generate && next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:push": "node -e \"require('dotenv').config({path:'.env.local'}); require('child_process').execSync('npx prisma db push',{stdio:'inherit'})\"",
+    "db:sync-firebase": "node scripts/sync-firebase-to-neon.mjs"
   },
   "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "dotenv": "^18.0.10",
     "firebase": "^13.1.0",
     "next": "16.4.3",
     "page-flip": "^2.0.7",
+    "prisma": "^6.19.3",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },

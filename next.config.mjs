@@ -2,6 +2,7 @@
 const nextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
+  serverExternalPackages: ["@prisma/client", "prisma"],
   turbopack: {
     root: process.cwd(),
   },

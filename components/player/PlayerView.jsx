@@ -15,6 +15,13 @@ import {
 
 export default function PlayerView({ onBack }) {
   const [imageError, setImageError] = useState(false);
+  const [activeModal, setActiveModal] = useState(null); // null | 'pl' | 'note'
+  const [newPlaylistName, setNewPlaylistName] = useState("");
+  const [clipTitle, setClipTitle] = useState("");
+  const [clipNote, setClipNote] = useState("");
+  const [clipFrom, setClipFrom] = useState(0);
+  const [clipTo, setClipTo] = useState(60);
+
   const {
     currentTrack,
     playlist,
@@ -22,6 +29,7 @@ export default function PlayerView({ onBack }) {
     isPlaying,
     currentTime,
     duration,
+    bufferedTime,
     speed,
     volume,
     audioError,
@@ -34,6 +42,14 @@ export default function PlayerView({ onBack }) {
     setSpeed,
     setVolume,
     closeFullPlayer,
+    userPlaylists,
+    isTrackInPlaylist,
+    toggleTrackInUserPlaylist,
+    createUserPlaylist,
+    getClipsForBook,
+    addAudioClip,
+    playClipSegment,
+    activeClipId,
   } = useAudioPlayer();
 
   useEffect(() => {
@@ -42,12 +58,22 @@ export default function PlayerView({ onBack }) {
 
   if (!currentTrack) return null;
 
-  const clips = currentTrack.clips || [
+  const savedClips = getClipsForBook(currentTrack);
+  const defaultClips = currentTrack.clips || [
     { name: "শুরু", s: 0 },
     { name: "দ্বিতীয় অংশ", s: Math.round(duration * 0.3) },
     { name: "তৃতীয় অংশ", s: Math.round(duration * 0.6) },
     { name: "শেষ অংশ", s: Math.round(duration * 0.85) },
   ];
+  const allClips = [
+    ...savedClips.map((c) => ({
+      ...c,
+      s: c.from,
+      name: c.title || c.content || `ক্লিপ ${formatTime(c.from)}–${formatTime(c.to)}`,
+      isUserClip: true,
+    })),
+    ...defaultClips,
+  ].sort((a, b) => a.s - b.s);
 
   const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -60,6 +86,33 @@ export default function PlayerView({ onBack }) {
     if (onBack) onBack();
   };
 
+  const openClipModal = () => {
+    const start = Math.floor(currentTime || 0);
+    const maxD = Math.max(10, Math.floor(duration || 1800));
+    setClipFrom(start);
+    setClipTo(Math.min(maxD, start + 60));
+    setClipTitle("");
+    setClipNote("");
+    setActiveModal("note");
+  };
+
+  const handleSaveClip = () => {
+    addAudioClip({
+      track: currentTrack,
+      bookId: currentTrack.bookId || currentTrack.id,
+      trackId: currentTrack.id,
+      bookTitle: currentTrack.title,
+      artist: currentTrack.artist || currentTrack.writer || "",
+      artwork: currentTrack.artwork || "",
+      url: currentTrack.url || "",
+      title: clipTitle,
+      content: clipNote,
+      from: clipFrom,
+      to: clipTo,
+    });
+    setActiveModal(null);
+  };
+
   const handleHorizontalWheel = (e) => {
     const container = e.currentTarget;
     if (Math.abs(e.deltaY) > Math.abs(e.deltaX) && container.scrollWidth > container.clientWidth) {
@@ -67,12 +120,44 @@ export default function PlayerView({ onBack }) {
     }
   };
 
+  const maxClipDur = Math.max(1, Math.floor(duration || 1800));
+  const rgLeftPct = (clipFrom / maxClipDur) * 100;
+  const rgWidthPct = Math.max(0, ((clipTo - clipFrom) / maxClipDur) * 100);
+
   return (
     <div className="view player-screen">
-      <button className="back" onClick={handleBack} style={{ marginBottom: "8px" }}>
-        <LeftArrowIcon />
-        Back
-      </button>
+      {/* Player Top Bar: Back + NOW PLAYING + Add to Playlist & Clip/Note buttons */}
+      <div className="ptop">
+        <button className="back" onClick={handleBack} style={{ marginBottom: 0 }}>
+          <LeftArrowIcon />
+          Back
+        </button>
+
+        <span className="pt">NOW PLAYING</span>
+
+        <span className="pact">
+          <button
+            type="button"
+            onClick={() => setActiveModal("pl")}
+            aria-label="Add to playlist"
+            title="Add to Playlist"
+          >
+            <svg viewBox="0 0 24 24">
+              <path d="M4 6h12M4 11h12M4 16h7M17 14v6M14 17h6" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            onClick={openClipModal}
+            aria-label="Clip and note"
+            title="Clip & Note"
+          >
+            <svg viewBox="0 0 24 24">
+              <path d="M6 3h8l4 4v14H6zM12 11v6M9 14h6" />
+            </svg>
+          </button>
+        </span>
+      </div>
 
       {audioError && (
         <div
@@ -147,34 +232,57 @@ export default function PlayerView({ onBack }) {
             </div>
           )}
 
-          {/* Quick Chapters / Clips */}
+          {/* Quick Chapters / Clips (includes user-saved Clips & Notes right on top!) */}
           <div>
-            <p className="hint">Clips and chapters</p>
+            <p className="hint">Clips and chapters ({allClips.length})</p>
             <div className="sp horiz-scroll" onWheel={handleHorizontalWheel}>
-              {clips.map((c, i) => (
+              {allClips.map((c, i) => (
                 <button
-                  key={i}
-                  onClick={() => seek(c.s)}
+                  key={c.id || i}
+                  onClick={() => (c.isUserClip ? playClipSegment(c, false) : seek(c.s))}
                   aria-pressed={
-                    currentTime >= c.s &&
-                    (i === clips.length - 1 || currentTime < clips[i + 1].s)
+                    c.isUserClip
+                      ? activeClipId === c.id
+                      : currentTime >= c.s &&
+                        (i === allClips.length - 1 || currentTime < allClips[i + 1].s)
                   }
+                  title={c.content || c.name}
                 >
-                  {c.name || formatTime(c.s)} ({formatTime(c.s)})
+                  {c.isUserClip ? "✂ " : ""}
+                  {c.name} ({formatTime(c.s)}
+                  {c.to ? `–${formatTime(c.to)}` : ""})
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Seekbar */}
+          {/* Seekbar with YouTube-style 3-Layer Progress Track (Unbuffered -> Buffered -> Played) */}
           <div>
             <div className="seek">
+              <div className="seek-buffer-track" aria-hidden="true">
+                <div
+                  className="seek-buffer-fill"
+                  style={{
+                    width: `${
+                      duration > 0 ? Math.min(100, (bufferedTime / duration) * 100) : 0
+                    }%`,
+                  }}
+                />
+                <div
+                  className="seek-played-fill"
+                  style={{
+                    width: `${
+                      duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0
+                    }%`,
+                  }}
+                />
+              </div>
               <div className="ticks">
-                {clips.map((c, i) => {
+                {allClips.map((c, i) => {
                   const percent = duration > 0 ? (c.s / duration) * 100 : 0;
                   return (
                     <i
-                      key={i}
+                      key={c.id || i}
                       style={{
                         left: `calc(${percent}% + ${8 - (percent / 100) * 16}px)`,
                       }}
@@ -186,6 +294,7 @@ export default function PlayerView({ onBack }) {
               <input
                 type="range"
                 id="seek"
+                className="seek-range-yt"
                 min="0"
                 max={duration || 100}
                 value={currentTime}
@@ -276,6 +385,159 @@ export default function PlayerView({ onBack }) {
           </label>
         </div>
       </div>
+
+      {/* Add to Playlist Modal (matching design #m-pl) */}
+      {activeModal === "pl" && (
+        <div className="ovl" onClick={() => setActiveModal(null)}>
+          <div
+            className="modal"
+            role="dialog"
+            aria-label="Add to Playlist"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3>Add to Playlist</h3>
+            <input
+              className="fld"
+              placeholder="Playlist Name"
+              value={newPlaylistName}
+              onChange={(e) => setNewPlaylistName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && newPlaylistName.trim()) {
+                  createUserPlaylist(newPlaylistName, currentTrack);
+                  setNewPlaylistName("");
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="btn"
+              style={{ marginTop: "12px", width: "100%" }}
+              onClick={() => {
+                if (newPlaylistName.trim()) {
+                  createUserPlaylist(newPlaylistName, currentTrack);
+                  setNewPlaylistName("");
+                }
+              }}
+            >
+              Create &amp; Add
+            </button>
+
+            <div style={{ marginTop: "10px", maxHeight: "220px", overflowY: "auto" }}>
+              {userPlaylists.map((pl) => {
+                const isAdded = isTrackInPlaylist(currentTrack.id, pl.id);
+                return (
+                  <div key={pl.id} className="plrow">
+                    <span>
+                      {pl.name} ({pl.tracks.length})
+                    </span>
+                    <button
+                      type="button"
+                      className="plus"
+                      aria-pressed={isAdded}
+                      aria-label={`Add to ${pl.name}`}
+                      onClick={() => toggleTrackInUserPlaylist(currentTrack, pl.id)}
+                    >
+                      {isAdded ? (
+                        <svg viewBox="0 0 24 24" style={{ width: "16px", height: "16px" }}>
+                          <path d="M5 12l5 5 9-10" />
+                        </svg>
+                      ) : (
+                        <svg viewBox="0 0 24 24" style={{ width: "16px", height: "16px" }}>
+                          <path d="M12 5v14M5 12h14" />
+                        </svg>
+                      )}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            <button type="button" className="cl" onClick={() => setActiveModal(null)}>
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Clip & Note Modal (matching design #m-note with Dual Range Slider) */}
+      {activeModal === "note" && (
+        <div className="ovl" onClick={() => setActiveModal(null)}>
+          <div
+            className="modal"
+            role="dialog"
+            aria-label="Clip and Note"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3>Clip &amp; Note</h3>
+            <div className="ft">
+              <div>
+                <small>FROM</small>
+                <b>{formatTime(clipFrom)}</b>
+              </div>
+              <span>→</span>
+              <div>
+                <small>TO</small>
+                <b>{formatTime(clipTo)}</b>
+              </div>
+            </div>
+
+            <input
+              className="fld"
+              placeholder="Clip Title (optional)..."
+              value={clipTitle}
+              onChange={(e) => setClipTitle(e.target.value)}
+            />
+            <input
+              className="fld"
+              placeholder="Note content..."
+              value={clipNote}
+              onChange={(e) => setClipNote(e.target.value)}
+            />
+
+            <div className="dual">
+              <div className="tr" />
+              <div
+                className="rg"
+                style={{ left: `${rgLeftPct}%`, width: `${rgWidthPct}%` }}
+              />
+              <input
+                type="range"
+                min="0"
+                max={maxClipDur}
+                value={clipFrom}
+                aria-label="From"
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  setClipFrom(Math.min(v, clipTo));
+                }}
+              />
+              <input
+                type="range"
+                min="0"
+                max={maxClipDur}
+                value={clipTo}
+                aria-label="To"
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  setClipTo(Math.max(v, clipFrom));
+                }}
+              />
+            </div>
+
+            <button
+              type="button"
+              className="btn"
+              style={{ width: "100%" }}
+              onClick={handleSaveClip}
+            >
+              Save Clip
+            </button>
+            <button type="button" className="cl" onClick={() => setActiveModal(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

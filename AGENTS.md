@@ -157,3 +157,43 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 3. **অডিও প্লে হচ্ছে না বা নতুন অডিও হোস্ট (যেমন S3/Cloudflare) সাপোর্ট দিতে:** ➔ `lib/firebase.js`-এর `formatAudioUrl()` এবং `context/AudioPlayerContext.js` দেখুন।
 4. **নেস্টেড অডিও পর্বের লিস্ট বা প্লেব্যাক আচরণ বদলাতে:** ➔ `components/views/BookDetailView.jsx` (ট্যাব `l`) এবং `lib/firebase.js`-এর `subscribeToBookNestedSubcollections()` দেখুন।
 5. **ডিজাইন, কালার বা ফন্ট সাইজ বদলাতে:** ➔ মূল অ্যাপের জন্য `app/golpojolpo.css` এবং পেজ-টার্ন রিডারের জন্য `app/globals.css` দেখুন।
+
+---
+
+## ৫. YouTube-স্টাইল অডিও চাঙ্ক ক্যাশিং, অফলাইন বাফার ও React Native পোর্টিং নোট
+
+> **AI এজেন্ট ও React Native ডেভেলপমেন্টের জন্য গুরুত্বপূর্ণ রেফারেন্স:**
+> অডিও ডাউনলোড ছাড়াই (ফাইল ম্যানেজারে MP3 না রেখেই) YouTube / Spotify-এর মতো বাফারিং, অফলাইন প্লেব্যাক (যতটুকু বাফার হয়েছে) এবং সার্ভার হিট কমানোর আর্কিটেকচার এখানে নথিভুক্ত করা হলো।
+
+### ক. ওয়েব অ্যাপে যেভাবে কাজ করছে:
+1. **Direct IndexedDB Offline Audio Cache (`lib/audioOfflineCache.js` — `v2`) + Production SW (`public/sw-audio-cache.js` — `v3`):**
+   - **Direct IndexedDB (`golpojolpo_offline_audio_v2`):** Chrome DevTools-এর "Offline" মোড বা ব্রাউজার SW বাইপাস করলেও অফলাইনে চলার জন্য `lib/audioOfflineCache.js` (`bypass_sw=1` দিয়ে ফুল স্ট্রিম ফেচ করে) প্রোগ্রেসিভলি অডিও সেভ করে এবং `URL.createObjectURL(blob)` দিয়ে লোকাল `blob:` URL থেকে প্লে করে। কোনো `blob:` করাপ্ট হলে `invalidateOfflineCachedAudio()` দিয়ে মুছে অটোমেটিক লাইভ সার্ভার থেকে রিকভার করে।
+   - **Production Service Worker (`golpojolpo_audio_chunks_v3`):** RFC 9110 Range Parsing (`bytes=a-b`, `bytes=a-`, suffix `bytes=-n`, `416`), আলাদা `chunks` + `chunk_index` স্টোর (Zero-OOM সিঙ্গেল-ট্রানজেকশন LRU ও ৩০ সেকেন্ড থ্রটলড `lastAccess`), অ্যাটমিক রাইট (Zero Race Condition), এবং স্ট্রিক্ট `Content-Range` / `Content-Length` ভ্যালিডেশন।
+   - **750 MB LRU Auto-Eviction + Persistent Storage:** `navigator.storage.persist()` রিকোয়েস্ট করা হয় এবং ৭৫০ MB পার হলে সক্রিয় ট্র্যাক সুরক্ষিত রেখে সবচেয়ে পুরনো চাঙ্ক/অডিও মুছে ৮৫%-এ নামিয়ে আনে (৫০০ MB পর্যন্ত একটি সম্পূর্ণ অডিওবুক অফলাইনে থাকে)।
+2. **অডিও প্লেয়ার ইঞ্জিন, লাস্ট-প্লে রিস্টোর ও বাফার বার (`context/AudioPlayerContext.js` ও `components/player/PlayerView.jsx`):**
+   - পেজ রিলোড হলে `golpojolpo_history_v1` থেকে **সর্বশেষ প্লে করা অডিওবুক** (`currentTime`, `duration`, `playlist` সহ) অটোমেটিক রিস্টোর হয়।
+   - `audio.preload = "auto"`, `online` ইভেন্ট অটো-রিকভারি, এবং `bufferedTime` স্টেট দিয়ে সিকবারে `.seek-buffer-track` / `.seek-buffer-fill` দেখানো হয়।
+   - **ক্লিপ ও নোট (`golpojolpo_audio_clips_v1`):** `addAudioClip`, `removeAudioClip`, `getClipsForBook`, `playClipSegment` — নির্দিষ্ট `from` থেকে `to` সেকেন্ড পর্যন্ত ক্লিপ প্লে করে অটো-পজ হয় এবং হোম পেইজের `Notes` ও অডিও ডিটেইলসের `Clips` ট্যাবে সিঙ্ক থাকে।
+   - **ই-বুক ফাইল স্ট্রিমিং ক্যাশ (`app/reader.js` — `golpojolpo_book_file_cache_v2_`):** `.md`/`.txt` ফাইল চাঙ্ক বাই চাঙ্ক স্ট্রিম করে ক্যাশ করে (`isComplete: true/false`); অসম্পূর্ণ থাকলে পরের বার অটোমেটিক রিলোড করে।
+
+### খ. ভবিষ্যতে React Native (Expo) অ্যাপে একই সুবিধা যেভাবে বসাতে হবে:
+- **Android (ExoPlayer):** `SimpleCache` + `LeastRecentlyUsedCacheEvictor(150 * 1024 * 1024)` + `CacheDataSource.Factory` (অথবা `react-native-track-player` এর `maxCacheSize` / `cache` অপশন) ব্যবহার করলে হুবহু একইভাবে ডাউনলোড ছাড়াই 512KB/1MB রেঞ্জ চাঙ্ক অ্যাপের প্রাইভেট ক্যাশ ডিরেক্টরিতে থাকবে।
+- **iOS (AVPlayer):** `AVAssetResourceLoaderDelegate` অথবা লোকাল প্রক্সি (`GCDWebServer` / `react-native-video` cache config) দিয়ে প্রাইভেট `Caches/` ডিরেক্টরিতে বাইট-রেঞ্জ চাঙ্ক ক্যাশ + 150MB LRU ইভিকশন করতে হবে।
+- **ই-বুক ও ক্লিপ ডাটা স্ট্রাকচার:** ওয়েবের `golpojolpo_audio_clips_v1` (`{ id, bookId, trackId, bookTitle, title, content, from, to }`), `golpojolpo_history_v1`, এবং `golpojolpo_book_file_cache_v2_` (`{ fileUrl, text, isComplete }`) একই স্কিমায় React Native-এর `AsyncStorage` / `expo-file-system` (`FileSystem.cacheDirectory`)-এ পোর্ট করা যাবে।
+
+---
+
+## ৬. Neon PostgreSQL (Prisma), Google লগইন ও সোশ্যাল এনগেজমেন্ট (Like, Comment, Rating)
+
+- **Prisma স্কিমা (`prisma/schema.prisma`) ও ক্লায়েন্ট (`lib/prisma.js`):**
+  - Firestore মিরর টেবিল: `categories`, `writers`, `writer_categories`, `books` (`tracksJson` সহ), `short_stories`।
+  - অথেনটিকেশন ও রোল (RBAC): `users` (`googleId`, `email`, `name`, `avatar`, `role: UserRole`)। ৫টি রোল ক্যাটাগরি: `SUPER_ADMIN` (Owner), `ADMIN`, `EDITOR`, `ARTIST`, `USER`।
+  - সোশ্যাল টেবিল: `likes`, `comments` (`parentId` রিপ্লাই সাপোর্টসহ), `ratings` (`score` ১–৫ ও `review`), যেখানে `targetType` = `AUDIOBOOK` | `EBOOK` এবং `targetId` = Firestore `docId`।
+- **Google OAuth ও HS256 JWT (`lib/auth.js`):**
+  - এন্ডপয়েন্টসমূহ: `GET /api/auth/google` ➔ `GET /api/auth/callback/google` ➔ `GET /api/auth/me` ➔ `POST /api/auth/logout`।
+  - স্টেটলেস HS256 JWT (`signAuthJwt`, `verifyAuthJwt`) — ওয়েবে HttpOnly কুকি (`gj_jwt`) এবং ভবিষ্যতে React Native অ্যাপের জন্য `Authorization: Bearer <jwt>` দুটিই `getSessionUser(request)`-এ সাপোর্টেড। রোল চেক হেল্পার: `hasRole`, `hasMinRole`।
+  - ক্লায়েন্ট প্রোভাইডার: `context/AuthContext.js` (`useAuth`), UI: `components/layout/Header.jsx` ও `components/layout/ProfileDialog.jsx`।
+- **সোশ্যাল API (`app/api/engagement/route.js`):**
+  - `GET /api/engagement?targetType=AUDIOBOOK|EBOOK&targetId=<docId>` — লাইক সংখ্যা, গড় রেটিং, ইউজারের নিজের লাইক/রেটিং ও কমেন্ট লিস্ট রিটার্ন করে।
+  - `POST /api/engagement` — লগইনকৃত ইউজারের জন্য `action`: `"like"` | `"rating"` | `"comment"` | `"delete_comment"`।
+- **Firebase ➔ Neon সিঙ্ক স্ক্রিপ্ট:** `node scripts/sync-firebase-to-neon.mjs` — Firestore-এর সব কালেকশন (`categories`, `writer`, `books` + নেস্টেড ট্র্যাক, `shortStory`) Neon PostgreSQL-এ মিরর/আপসার্ট করে।

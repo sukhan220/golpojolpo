@@ -23,7 +23,18 @@ export default function BookDetailView({ book, onBack, backLabel = "Back" }) {
     togglePlay,
     openFullPlayer,
     seek,
+    getClipsForBook,
+    addAudioClip,
+    removeAudioClip,
+    playClipSegment,
+    activeClipId,
   } = useAudioPlayer();
+
+  const [showAddClipModal, setShowAddClipModal] = useState(false);
+  const [newClipTitle, setNewClipTitle] = useState("");
+  const [newClipContent, setNewClipContent] = useState("");
+  const [newClipFrom, setNewClipFrom] = useState(0);
+  const [newClipTo, setNewClipTo] = useState(60);
 
   if (!book) return null;
 
@@ -39,11 +50,16 @@ export default function BookDetailView({ book, onBack, backLabel = "Back" }) {
   }, [book]);
 
   const durationSec = book.durationSec || 1800;
-  const clips = book.clips || [
+  const userSavedClips = getClipsForBook(book);
+  const defaultClips = book.clips || [
     { name: "শুরু", s: 0 },
     { name: "দ্বিতীয় অংশ", s: Math.round(durationSec * 0.3) },
     { name: "তৃতীয় অংশ", s: Math.round(durationSec * 0.6) },
     { name: "শেষ অংশ", s: Math.round(durationSec * 0.85) },
+  ];
+  const clips = [
+    ...userSavedClips.map((c) => ({ ...c, isUserClip: true })),
+    ...defaultClips.map((c) => ({ ...c, isUserClip: false })),
   ];
 
   const targetFirstTrack = nestedTracks.length > 0 ? nestedTracks[0] : book;
@@ -205,21 +221,98 @@ export default function BookDetailView({ book, onBack, backLabel = "Back" }) {
             {/* Clips Tab */}
             {tab === "c" && (
               <div>
-                {clips.map((clip, i) => (
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    marginBottom: "10px",
+                  }}
+                >
+                  <span style={{ fontSize: "13px", color: "var(--mute)" }}>
+                    সেভ করা ক্লিপ ও চ্যাপ্টার ({clips.length})
+                  </span>
                   <button
-                    key={i}
-                    className="clip"
-                    onClick={() => handlePlayClip(clip.s)}
+                    type="button"
+                    onClick={() => {
+                      setNewClipFrom(0);
+                      setNewClipTo(Math.min(durationSec, 60));
+                      setNewClipTitle("");
+                      setNewClipContent("");
+                      setShowAddClipModal(true);
+                    }}
+                    style={{
+                      padding: "5px 12px",
+                      borderRadius: "999px",
+                      background: "var(--ink)",
+                      color: "#fff",
+                      fontSize: "12px",
+                      fontWeight: 600,
+                    }}
                   >
-                    <span className="dot">
-                      <PlayIcon size={14} />
-                    </span>
-                    <div>
-                      <b>{formatTime(clip.s)}</b>
-                      <span>{clip.name}</span>
-                    </div>
+                    + Add Clip
                   </button>
-                ))}
+                </div>
+
+                {clips.map((clip, i) => {
+                  const isClipPlaying = clip.isUserClip && activeClipId === clip.id && isPlaying;
+                  return (
+                    <div
+                      key={clip.id || i}
+                      className="clip"
+                      style={{
+                        borderColor: isClipPlaying ? "var(--ink)" : undefined,
+                        background: isClipPlaying ? "var(--soft)" : undefined,
+                      }}
+                    >
+                      <button
+                        type="button"
+                        className="dot"
+                        onClick={() => {
+                          if (clip.isUserClip) {
+                            playClipSegment(clip, false);
+                          } else {
+                            handlePlayClip(clip.s);
+                          }
+                        }}
+                        title="Play Clip"
+                      >
+                        {isClipPlaying ? <PauseIcon size={14} /> : <PlayIcon size={14} />}
+                      </button>
+
+                      <div
+                        style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
+                        onClick={() => {
+                          if (clip.isUserClip) {
+                            playClipSegment(clip, true);
+                          } else {
+                            handlePlayClip(clip.s);
+                          }
+                        }}
+                      >
+                        <b>
+                          {clip.title || clip.name}{" "}
+                          <small style={{ fontWeight: 500, color: "var(--mute)" }}>
+                            ({formatTime(clip.from ?? clip.s)}
+                            {clip.to ? ` – ${formatTime(clip.to)}` : ""})
+                          </small>
+                        </b>
+                        {clip.content && <span>{clip.content}</span>}
+                      </div>
+
+                      {clip.isUserClip && (
+                        <button
+                          type="button"
+                          onClick={() => removeAudioClip(clip.id)}
+                          style={{ color: "var(--mute)", fontSize: "14px", padding: "4px 6px" }}
+                          title="Delete Clip"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
 
@@ -300,6 +393,98 @@ export default function BookDetailView({ book, onBack, backLabel = "Back" }) {
           </div>
         </div>
       </div>
+
+      {/* Add Clip Modal directly from Book Detail Clips tab */}
+      {showAddClipModal && (
+        <div className="ovl" onClick={() => setShowAddClipModal(false)}>
+          <div
+            className="modal"
+            role="dialog"
+            aria-label="Clip and Note"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3>Clip &amp; Note</h3>
+            <div className="ft">
+              <div>
+                <small>FROM</small>
+                <b>{formatTime(newClipFrom)}</b>
+              </div>
+              <span>→</span>
+              <div>
+                <small>TO</small>
+                <b>{formatTime(newClipTo)}</b>
+              </div>
+            </div>
+
+            <input
+              className="fld"
+              placeholder="Clip Title..."
+              value={newClipTitle}
+              onChange={(e) => setNewClipTitle(e.target.value)}
+            />
+            <input
+              className="fld"
+              placeholder="Note content..."
+              value={newClipContent}
+              onChange={(e) => setNewClipContent(e.target.value)}
+            />
+
+            <div className="dual">
+              <div className="tr" />
+              <div
+                className="rg"
+                style={{
+                  left: `${(newClipFrom / Math.max(1, durationSec)) * 100}%`,
+                  width: `${Math.max(0, ((newClipTo - newClipFrom) / Math.max(1, durationSec)) * 100)}%`,
+                }}
+              />
+              <input
+                type="range"
+                min="0"
+                max={durationSec}
+                value={newClipFrom}
+                aria-label="From"
+                onChange={(e) => setNewClipFrom(Math.min(Number(e.target.value), newClipTo))}
+              />
+              <input
+                type="range"
+                min="0"
+                max={durationSec}
+                value={newClipTo}
+                aria-label="To"
+                onChange={(e) => setNewClipTo(Math.max(Number(e.target.value), newClipFrom))}
+              />
+            </div>
+
+            <button
+              type="button"
+              className="btn"
+              style={{ width: "100%" }}
+              onClick={() => {
+                addAudioClip({
+                  track: targetFirstTrack,
+                  bookId: book.id,
+                  trackId: targetFirstTrack.id,
+                  bookTitle: book.title,
+                  artist: book.artist || book.writer || "",
+                  artwork: book.artwork || "",
+                  url: targetFirstTrack.url || book.url || "",
+                  title: newClipTitle,
+                  content: newClipContent,
+                  from: newClipFrom,
+                  to: newClipTo,
+                });
+                setShowAddClipModal(false);
+              }}
+            >
+              Save Clip
+            </button>
+            <button type="button" className="cl" onClick={() => setShowAddClipModal(false)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -128,6 +128,11 @@ export default function HomeView({
     toggleTrackInUserPlaylist,
     historyItems,
     removeHistoryItem,
+    audioClips,
+    activeClipId,
+    playClipSegment,
+    removeAudioClip,
+    openFullPlayer,
   } = useAudioPlayer();
 
   const collections = [
@@ -497,24 +502,37 @@ export default function HomeView({
                       : Array.isArray(rawList?.quotes)
                       ? rawList.quotes
                       : [];
-                    arr.forEach((n) => allQuotes.push({ ...n, bookId }));
+                    arr.forEach((n) => allQuotes.push({ ...n, bookId, itemType: "quote" }));
                   });
+
+                  const allAudioClips = (audioClips || []).map((c) => ({
+                    ...c,
+                    itemType: "clip",
+                  }));
+
+                  const combined = [...allAudioClips, ...allQuotes].sort(
+                    (a, b) => (b.createdAt || 0) - (a.createdAt || 0)
+                  );
 
                   const q = notesSearch.trim().toLowerCase();
                   const filtered = q
-                    ? allQuotes.filter(
-                        (n) =>
-                          (n.title || "").toLowerCase().includes(q) ||
-                          (n.ref?.text || "").toLowerCase().includes(q) ||
-                          (n.ref?.bookTitle || "").toLowerCase().includes(q) ||
-                          (n.content || "").toLowerCase().includes(q)
+                    ? combined.filter((n) =>
+                        n.itemType === "clip"
+                          ? (n.title || "").toLowerCase().includes(q) ||
+                            (n.content || "").toLowerCase().includes(q) ||
+                            (n.bookTitle || "").toLowerCase().includes(q) ||
+                            (n.artist || "").toLowerCase().includes(q)
+                          : (n.title || "").toLowerCase().includes(q) ||
+                            (n.ref?.text || "").toLowerCase().includes(q) ||
+                            (n.ref?.bookTitle || "").toLowerCase().includes(q) ||
+                            (n.content || "").toLowerCase().includes(q)
                       )
-                    : allQuotes;
+                    : combined;
 
                   if (filtered.length === 0) {
                     return (
                       <div style={{ fontSize: "13px", color: "var(--mute)", padding: "14px 0" }}>
-                        কোনো সংরক্ষিত বুক নোট বা হাইলাইট পাওয়া যায়নি। বই পড়ার সময় যেকোনো লাইন সিলেক্ট করে <b>Note</b> বাটনে ক্লিক করলে এখানে যুক্ত হবে।
+                        কোনো সংরক্ষিত অডিও ক্লিপ বা বুক নোট পাওয়া যায়নি। অডিও প্লেয়ার থেকে <b>Clip &amp; Note</b> অথবা বই পড়ার সময় টেক্সট সিলেক্ট করে <b>Note</b> যোগ করুন।
                       </div>
                     );
                   }
@@ -522,6 +540,109 @@ export default function HomeView({
                   return (
                     <div style={{ display: "grid", gap: "10px" }}>
                       {filtered.map((n) => {
+                        if (n.itemType === "clip") {
+                          const isClipPlaying = activeClipId === n.id && isPlaying;
+                          const matchedAudioBook = audioBooks.find(
+                            (b) => b.id === n.bookId || b.id === n.trackId
+                          );
+                          return (
+                            <div
+                              key={n.id}
+                              style={{
+                                border: "1px solid var(--line)",
+                                borderLeft: "4px solid var(--ink)",
+                                borderRadius: "12px",
+                                padding: "12px",
+                                background: "var(--soft)",
+                              }}
+                            >
+                              <div
+                                style={{
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  alignItems: "flex-start",
+                                  gap: "8px",
+                                }}
+                              >
+                                <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
+                                  <button
+                                    type="button"
+                                    className="dot"
+                                    onClick={() => playClipSegment(n, false)}
+                                    title="শুধু এই ক্লিপটি প্লে করুন"
+                                  >
+                                    {isClipPlaying ? <PauseIcon size={14} /> : <PlayIcon size={14} />}
+                                  </button>
+                                  <div style={{ minWidth: 0 }}>
+                                    <b style={{ fontSize: "14px", display: "block" }}>
+                                      {n.title || "Audio Clip"}
+                                    </b>
+                                    <span style={{ fontSize: "11.5px", color: "var(--mute)" }}>
+                                      {n.bookTitle} · {formatTime(n.from)} – {formatTime(n.to)}
+                                    </span>
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => removeAudioClip(n.id)}
+                                  style={{ fontSize: "13px", color: "var(--mute)", padding: "2px 6px" }}
+                                  title="Delete Clip"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+
+                              {n.content && (
+                                <div
+                                  style={{
+                                    margin: "8px 0 6px",
+                                    fontSize: "13px",
+                                    lineHeight: 1.55,
+                                    color: "var(--ink)",
+                                  }}
+                                >
+                                  {n.content}
+                                </div>
+                              )}
+
+                              <div style={{ display: "flex", gap: "12px", marginTop: "6px" }}>
+                                <button
+                                  type="button"
+                                  onClick={() => playClipSegment(n, false)}
+                                  style={{
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                    color: "var(--ink)",
+                                    padding: "3px 0",
+                                  }}
+                                >
+                                  {isClipPlaying ? "Pause Clip" : "▶ Play Clip Only"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setShowNotesModal(false);
+                                    if (matchedAudioBook && onOpenBook) {
+                                      onOpenBook(matchedAudioBook);
+                                    } else {
+                                      playClipSegment(n, true);
+                                      openFullPlayer();
+                                    }
+                                  }}
+                                  style={{
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                    color: "#6b4f2d",
+                                    padding: "3px 0",
+                                  }}
+                                >
+                                  মূল অডিওতে যান →
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        }
+
                         const matchedStory = shortStories.find(
                           (s) => s.id === n.bookId || `shortStory:${s.id}` === n.bookId
                         );

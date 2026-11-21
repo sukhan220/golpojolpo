@@ -6,7 +6,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql" // or "mysql" / "sqlite" depending on your target DB
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -14,14 +14,14 @@ datasource db {
 // 1. categories (লাইব্রেরি)
 // -------------------------------------------------------------
 model Category {
-  id        String       @id @default(cuid())
-  docId     String       @unique // Matches Firestore doc ID: "c-1", "c-10", etc.
-  bn        String       // Bengali name: "ছোট গল্প", "ভ্রমণ কাহিনী"
-  en        String?      // English name: "Short Story"
-  audio     Boolean      @default(true)
-  kindle    Boolean      @default(true)
-  createdAt DateTime     @default(now())
-  updatedAt DateTime     @updatedAt
+  id        String           @id @default(cuid())
+  docId     String           @unique // Matches Firestore doc ID: "c-1", "c-10", etc.
+  bn        String           // Bengali name: "ছোট গল্প", "ভ্রমণ কাহিনী"
+  en        String?          // English name: "Short Story"
+  audio     Boolean          @default(true)
+  kindle    Boolean          @default(true)
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
 
   // Relations
   books        Book[]
@@ -45,15 +45,16 @@ model Book {
   voice       String?   // Narrator: "জয় বিশ্বাস"
   artwork     String?   // Image URL
   description String?
+  tracksJson  Json?     // Nested parts/episodes array mirrored from Firestore
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
   // Relations
   cateId      String?
-  category    Category? @relation(fields: [cateId], references: [docId])
+  category    Category? @relation(fields: [cateId], references: [docId], onDelete: SetNull)
 
   writerId    String?
-  author      Writer?   @relation(fields: [writerId], references: [docId])
+  author      Writer?   @relation(fields: [writerId], references: [docId], onDelete: SetNull)
 
   @@map("books")
 }
@@ -74,10 +75,10 @@ model ShortStory {
 
   // Relations
   cateId    String?
-  category  Category? @relation(fields: [cateId], references: [docId])
+  category  Category? @relation(fields: [cateId], references: [docId], onDelete: SetNull)
 
   writerId  String?
-  author    Writer?   @relation(fields: [writerId], references: [docId])
+  author    Writer?   @relation(fields: [writerId], references: [docId], onDelete: SetNull)
 
   @@map("short_stories")
 }
@@ -89,8 +90,10 @@ model Writer {
   id        String           @id @default(cuid())
   docId     String           @unique // Matches Firestore: "w-1", "w-2"
   bn        String           // Bengali writer name: "রবীন্দ্রনাথ ঠাকুর"
+  en        String?          // English writer name
   bio       String?
   avatar    String?
+  show      Boolean          @default(true)
   createdAt DateTime         @default(now())
   updatedAt DateTime         @updatedAt
 
@@ -111,4 +114,84 @@ model WriterCategory {
 
   @@id([writerId, categoryId])
   @@map("writer_categories")
+}
+
+// -------------------------------------------------------------
+// 5. Auth (Google OAuth + JWT Auth + 5-Tier RBAC — Web & App Ready)
+// -------------------------------------------------------------
+enum UserRole {
+  SUPER_ADMIN // Owner
+  ADMIN
+  EDITOR
+  ARTIST
+  USER
+}
+
+model User {
+  id        String    @id @default(cuid())
+  googleId  String?   @unique
+  email     String    @unique
+  name      String?
+  avatar    String?
+  role      UserRole  @default(USER)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  likes     Like[]
+  comments  Comment[]
+  ratings   Rating[]
+
+  @@map("users")
+}
+
+// -------------------------------------------------------------
+// 6. Social & Engagement (Like, Comment, Rating)
+// -------------------------------------------------------------
+enum ContentType {
+  AUDIOBOOK
+  EBOOK
+}
+
+model Like {
+  id         String      @id @default(cuid())
+  userId     String
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  targetType ContentType
+  targetId   String      // Book.docId or ShortStory.docId
+  createdAt  DateTime    @default(now())
+
+  @@unique([userId, targetType, targetId])
+  @@index([targetType, targetId])
+  @@map("likes")
+}
+
+model Comment {
+  id         String      @id @default(cuid())
+  userId     String
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  targetType ContentType
+  targetId   String      // Book.docId or ShortStory.docId
+  body       String
+  parentId   String?     // Optional reply thread support
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  @@index([targetType, targetId, createdAt])
+  @@map("comments")
+}
+
+model Rating {
+  id         String      @id @default(cuid())
+  userId     String
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  targetType ContentType
+  targetId   String      // Book.docId or ShortStory.docId
+  score      Int         // 1 to 5
+  review     String?
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  @@unique([userId, targetType, targetId])
+  @@index([targetType, targetId])
+  @@map("ratings")
 }

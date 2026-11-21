@@ -6,6 +6,7 @@ import {
   AudioPlayerProvider,
   useAudioPlayer,
 } from "../context/AudioPlayerContext";
+import { AuthProvider } from "../context/AuthContext";
 import Navigation from "./layout/Navigation";
 import ProfileDialog from "./layout/ProfileDialog";
 import MiniPlayer from "./player/MiniPlayer";
@@ -312,8 +313,10 @@ function MainApp() {
 
 export default function GolpoJolpoApp() {
   return (
-    <AudioPlayerProvider>
-      <MainApp />
-    </AudioPlayerProvider>
+    <AuthProvider>
+      <AudioPlayerProvider>
+        <MainApp />
+      </AudioPlayerProvider>
+    </AuthProvider>
   );
 }

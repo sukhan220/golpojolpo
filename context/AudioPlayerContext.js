@@ -3,11 +3,17 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from "react";
 import { MOCK_AUDIO_BOOKS } from "../lib/mockData";
 import { formatAudioUrl } from "../lib/firebase";
+import {
+  getOfflineCachedAudioUrl,
+  cacheAudioInBackground,
+  invalidateOfflineCachedAudio,
+} from "../lib/audioOfflineCache";
 
 const AudioPlayerContext = createContext(null);
 
 const USER_PLAYLISTS_KEY = "golpojolpo_user_playlists_v1";
 const USER_HISTORY_KEY = "golpojolpo_history_v1";
+const USER_CLIPS_KEY = "golpojolpo_audio_clips_v1";
 
 const DEFAULT_USER_PLAYLISTS = [
   {
@@ -24,6 +30,7 @@ export function AudioPlayerProvider({ children }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [bufferedTime, setBufferedTime] = useState(0);
   const [speed, setSpeed] = useState(1);
   const [volume, setVolume] = useState(80);
   const [isFullPlayerOpen, setIsFullPlayerOpen] = useState(false);
@@ -31,6 +38,9 @@ export function AudioPlayerProvider({ children }) {
   const [audioError, setAudioError] = useState(null);
   const [userPlaylists, setUserPlaylists] = useState(DEFAULT_USER_PLAYLISTS);
   const [historyItems, setHistoryItems] = useState([]);
+  const [audioClips, setAudioClips] = useState([]);
+  const [activeClipEndSec, setActiveClipEndSec] = useState(null);
+  const [activeClipId, setActiveClipId] = useState(null);
 
   const audioRef = useRef(null);
   const pendingResumeTimeRef = useRef(null);
@@ -38,6 +48,77 @@ export function AudioPlayerProvider({ children }) {
   const historyItemsRef = useRef([]);
   const currentTrackRef = useRef(null);
   const playlistRef = useRef([]);
+  const activeClipEndRef = useRef(null);
+  const loadedStreamKeyRef = useRef("");
+  const networkRetryRef = useRef(0);
+  const loadAndPlayAudioSourceRef = useRef(null);
+
+  const buildDirectStreamUrl = (streamUrl, bypassSw = false) => {
+    if (!bypassSw || !streamUrl) return streamUrl;
+    try {
+      const parsed = new URL(streamUrl, window.location.origin);
+      parsed.searchParams.set("bypass_sw", "1");
+      return parsed.pathname + parsed.search;
+    } catch {
+      return streamUrl + (streamUrl.includes("?") ? "&" : "?") + "bypass_sw=1";
+    }
+  };
+
+  // Helper: Load audio source using IndexedDB blob: URL first (100% offline-capable!),
+  // otherwise stream from network while caching progressively in IndexedDB in background.
+  const loadAndPlayAudioSource = async (streamUrl, resumeSec = 0, options = {}) => {
+    const { forceNetwork = false, bypassSw = false, autoPlay = true } = options;
+    const audio = audioRef.current;
+    if (!audio || !streamUrl) return;
+
+    const isOfflineNow = typeof navigator !== "undefined" && navigator.onLine === false;
+    const cachedInfo = forceNetwork ? null : await getOfflineCachedAudioUrl(streamUrl);
+
+    // Choose local blob: URL if completely cached OR if currently offline with partial cache
+    const useBlob = !forceNetwork && cachedInfo && (cachedInfo.complete || isOfflineNow);
+    const playSrc = useBlob
+      ? cachedInfo.url
+      : buildDirectStreamUrl(streamUrl, bypassSw);
+
+    try {
+      audio.pause();
+      pendingResumeTimeRef.current = resumeSec > 0 ? resumeSec : null;
+      loadedStreamKeyRef.current = streamUrl;
+      audio.src = playSrc;
+      audio.currentTime = resumeSec;
+      audio.playbackRate = speed;
+      audio.volume = Math.max(0, Math.min(1, volume / 100));
+      audio.load();
+
+      if (autoPlay) {
+        const playPromise = audio.play();
+        if (playPromise !== undefined) {
+          setIsPlaying(true);
+          setAudioError(null);
+          playPromise.catch((err) => {
+            console.warn("Audio playback prevented or failed:", playSrc, err);
+            setIsPlaying(false);
+          });
+        }
+      }
+    } catch (err) {
+      console.warn("Audio start error:", err);
+      setIsPlaying(false);
+    }
+
+    // If not completely cached yet and we're online, progressively cache into IndexedDB
+    if (!cachedInfo?.complete && !isOfflineNow) {
+      cacheAudioInBackground(streamUrl, ({ loadedBytes, totalBytes, complete }) => {
+        if (loadedStreamKeyRef.current === streamUrl && totalBytes > 0) {
+          const estDur = audio.duration && !isNaN(audio.duration) ? audio.duration : duration || 1800;
+          const cachedSec = complete ? estDur : (loadedBytes / totalBytes) * estDur;
+          setBufferedTime((prev) => Math.max(prev, cachedSec));
+        }
+      }).catch(() => {});
+    }
+  };
+
+  loadAndPlayAudioSourceRef.current = loadAndPlayAudioSource;
 
   useEffect(() => {
     historyItemsRef.current = historyItems;
@@ -137,13 +218,58 @@ export function AudioPlayerProvider({ children }) {
   };
 
   /**
-   * Sets the initial default track from real Firebase/cached audioBooks
-   * without auto-playing, or replaces a mock placeholder track.
+   * Helper: finds the most recently played audio entry from memory or localStorage.
+   */
+  const getLastPlayedAudioFromHistory = () => {
+    const inMem = (historyItemsRef.current || []).find(
+      (h) => h && h.type === "audio" && h.track && h.track.id
+    );
+    if (inMem) return inMem;
+    if (typeof window !== "undefined") {
+      try {
+        const saved = window.localStorage.getItem(USER_HISTORY_KEY);
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed)) {
+            return (
+              parsed.find((h) => h && h.type === "audio" && h.track && h.track.id) ||
+              null
+            );
+          }
+        }
+      } catch {
+        // Ignore storage error
+      }
+    }
+    return null;
+  };
+
+  /**
+   * Restores the last played audio track from history (without auto-playing),
+   * or falls back to the first real Firebase/cached audiobook if no history exists.
    */
   const syncInitialTrack = (firstRealBook) => {
     if (!firstRealBook || firstRealBook.isMock) return;
     setCurrentTrack((prev) => {
       if (!prev || prev.isMock) {
+        const lastAudio = getLastPlayedAudioFromHistory();
+        if (lastAudio && lastAudio.track) {
+          const restoredTrack = {
+            ...lastAudio.track,
+            url: formatAudioUrl(lastAudio.track.url),
+          };
+          const restoredList =
+            Array.isArray(lastAudio.playlist) && lastAudio.playlist.length > 0
+              ? lastAudio.playlist
+              : [restoredTrack];
+          const idx = restoredList.findIndex((t) => t.id === restoredTrack.id);
+          setPlaylist(restoredList);
+          setPlaylistIndex(idx >= 0 ? idx : 0);
+          setCurrentTime(lastAudio.currentTime || 0);
+          setDuration(lastAudio.duration || restoredTrack.durationSec || 1800);
+          return restoredTrack;
+        }
+
         const hasParts = Array.isArray(firstRealBook.tracks) && firstRealBook.tracks.length > 0;
         const target = hasParts ? firstRealBook.tracks[0] : firstRealBook;
         if (hasParts) {
@@ -185,12 +311,158 @@ export function AudioPlayerProvider({ children }) {
         if (Array.isArray(parsedHist)) {
           setHistoryItems(parsedHist);
           historyItemsRef.current = parsedHist;
+
+          // Immediately restore the last played audio track on reload (without auto-playing)
+          const lastAudio = parsedHist.find(
+            (h) => h && h.type === "audio" && h.track && h.track.id
+          );
+          if (lastAudio) {
+            const restoredTrack = {
+              ...lastAudio.track,
+              url: formatAudioUrl(lastAudio.track.url),
+            };
+            const restoredList =
+              Array.isArray(lastAudio.playlist) && lastAudio.playlist.length > 0
+                ? lastAudio.playlist
+                : [restoredTrack];
+            const idx = restoredList.findIndex((t) => t.id === restoredTrack.id);
+            setCurrentTrack((prev) => (!prev || prev.isMock ? restoredTrack : prev));
+            setPlaylist(restoredList);
+            setPlaylistIndex(idx >= 0 ? idx : 0);
+            setCurrentTime(lastAudio.currentTime || 0);
+            setDuration(lastAudio.duration || restoredTrack.durationSec || 1800);
+          }
+        }
+      }
+    } catch {
+      // Ignore storage error
+    }
+
+    try {
+      const savedClips = window.localStorage.getItem(USER_CLIPS_KEY);
+      if (savedClips) {
+        const parsedClips = JSON.parse(savedClips);
+        if (Array.isArray(parsedClips)) {
+          setAudioClips(parsedClips);
         }
       }
     } catch {
       // Ignore storage error
     }
   }, []);
+
+  const persistAudioClips = (nextClips) => {
+    setAudioClips(nextClips);
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(USER_CLIPS_KEY, JSON.stringify(nextClips));
+      } catch {
+        // Ignore storage error
+      }
+    }
+  };
+
+  const addAudioClip = (clipPayload) => {
+    if (!clipPayload) return null;
+    const fromSec = Math.max(0, Math.floor(Number(clipPayload.from) || 0));
+    const toSec = Math.max(fromSec + 1, Math.floor(Number(clipPayload.to) || fromSec + 30));
+    const newClip = {
+      id: `clip-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      bookId: clipPayload.bookId || clipPayload.track?.bookId || clipPayload.track?.id || "",
+      trackId: clipPayload.trackId || clipPayload.track?.id || "",
+      bookTitle: clipPayload.bookTitle || clipPayload.track?.title || "অডিও ক্লিপ",
+      artist: clipPayload.artist || clipPayload.track?.artist || clipPayload.track?.writer || "",
+      artwork: clipPayload.artwork || clipPayload.track?.artwork || "",
+      url: formatAudioUrl(clipPayload.url || clipPayload.track?.url || ""),
+      track: clipPayload.track
+        ? {
+            ...clipPayload.track,
+            url: formatAudioUrl(clipPayload.track.url || clipPayload.url || ""),
+          }
+        : null,
+      title: (clipPayload.title || "").trim() || `ক্লিপ ${formatTime(fromSec)}–${formatTime(toSec)}`,
+      content: (clipPayload.content || "").trim(),
+      from: fromSec,
+      to: toSec,
+      s: fromSec,
+      name: (clipPayload.title || clipPayload.content || "").trim() || `ক্লিপ ${formatTime(fromSec)}–${formatTime(toSec)}`,
+      createdAt: Date.now(),
+    };
+    const next = [newClip, ...audioClips];
+    persistAudioClips(next);
+    return newClip;
+  };
+
+  const removeAudioClip = (clipId) => {
+    persistAudioClips(audioClips.filter((c) => c.id !== clipId));
+    if (activeClipId === clipId) {
+      activeClipEndRef.current = null;
+      setActiveClipEndSec(null);
+      setActiveClipId(null);
+    }
+  };
+
+  const getClipsForBook = (bookOrTrack) => {
+    if (!bookOrTrack) return [];
+    const targetBookId = bookOrTrack.bookId || bookOrTrack.id;
+    const targetTrackId = bookOrTrack.id;
+    return audioClips
+      .filter(
+        (c) =>
+          (targetBookId && (c.bookId === targetBookId || c.trackId === targetBookId)) ||
+          (targetTrackId && (c.trackId === targetTrackId || c.bookId === targetTrackId))
+      )
+      .sort((a, b) => (a.from || a.s || 0) - (b.from || b.s || 0));
+  };
+
+  const playClipSegment = (clip, openPlayer = false) => {
+    if (!clip) return;
+    const startSec = Math.max(0, Number(clip.from ?? clip.s ?? 0));
+    const endSec = clip.to && Number(clip.to) > startSec ? Number(clip.to) : null;
+
+    // If the same clip is currently playing, toggle pause
+    if (activeClipId === clip.id && isPlaying) {
+      pauseTrack();
+      return;
+    }
+
+    const trackObj = clip.track || {
+      id: clip.trackId || clip.bookId || clip.id,
+      bookId: clip.bookId || clip.trackId || clip.id,
+      title: clip.bookTitle || clip.title,
+      artist: clip.artist || "",
+      writer: clip.artist || "",
+      artwork: clip.artwork || "",
+      url: formatAudioUrl(clip.url || ""),
+      durationSec: Math.max(endSec || 0, 1800),
+    };
+
+    activeClipEndRef.current = endSec;
+    setActiveClipEndSec(endSec);
+    setActiveClipId(clip.id);
+
+    const sameTrack =
+      currentTrackRef.current &&
+      (currentTrackRef.current.id === trackObj.id ||
+        (currentTrackRef.current.url && currentTrackRef.current.url === formatAudioUrl(trackObj.url)));
+
+    if (sameTrack && audioRef.current?.src) {
+      seek(startSec);
+      if (!isPlaying) {
+        audioRef.current.play?.().then(() => setIsPlaying(true)).catch(() => {});
+      }
+    } else {
+      playTrack(trackObj, null, startSec);
+      // Re-apply activeClipEndRef since playTrack clears it
+      activeClipEndRef.current = endSec;
+      setActiveClipEndSec(endSec);
+      setActiveClipId(clip.id);
+    }
+
+    if (openPlayer) {
+      setIsFullPlayerOpen(true);
+    }
+  };
 
   const saveUserPlaylists = (nextLists) => {
     setUserPlaylists(nextLists);
@@ -280,6 +552,9 @@ export function AudioPlayerProvider({ children }) {
   const playTrack = (track, newPlaylist = null, explicitResumeTime = null) => {
     if (!track) return;
 
+    activeClipEndRef.current = null;
+    setActiveClipEndSec(null);
+    setActiveClipId(null);
     setIsMiniPlayerDismissed(false);
 
     let activeList = playlist;
@@ -341,29 +616,9 @@ export function AudioPlayerProvider({ children }) {
       activeList
     );
 
-    if (audioRef.current) {
-      try {
-        audioRef.current.pause();
-        pendingResumeTimeRef.current = resumeSec > 0 ? resumeSec : null;
-        audioRef.current.src = resolvedUrl;
-        audioRef.current.currentTime = resumeSec;
-        audioRef.current.playbackRate = speed;
-        audioRef.current.volume = Math.max(0, Math.min(1, volume / 100));
-        audioRef.current.load();
-
-        const playPromise = audioRef.current.play();
-        if (playPromise !== undefined) {
-          setIsPlaying(true);
-          playPromise.catch((err) => {
-            console.warn("Audio playback prevented or failed:", resolvedUrl, err);
-            setIsPlaying(false);
-          });
-        }
-      } catch (err) {
-        console.warn("Audio start error:", err);
-        setIsPlaying(false);
-      }
-    }
+    setBufferedTime(0);
+    networkRetryRef.current = 0;
+    loadAndPlayAudioSource(resolvedUrl, resumeSec);
   };
 
   const pauseTrack = () => {
@@ -407,7 +662,14 @@ export function AudioPlayerProvider({ children }) {
       }
 
       if (audioRef.current) {
-        if (!audioRef.current.src || !audioRef.current.src.endsWith(streamUrl)) {
+        const hadError = Boolean(audioRef.current.error) || Boolean(audioError);
+        const needsReload =
+          !audioRef.current.src ||
+          loadedStreamKeyRef.current !== streamUrl ||
+          hadError ||
+          audioRef.current.readyState === 0;
+
+        if (needsReload) {
           const savedHist = (historyItemsRef.current || []).find(
             (h) => h.id === `audio:${currentTrack.id}`
           );
@@ -417,9 +679,13 @@ export function AudioPlayerProvider({ children }) {
               : savedHist?.currentTime > 3
               ? savedHist.currentTime
               : 0;
-          pendingResumeTimeRef.current = resumeSec > 0 ? resumeSec : null;
-          audioRef.current.src = streamUrl;
-          audioRef.current.load();
+          networkRetryRef.current = 0;
+          const isOnlineNow = typeof navigator === "undefined" || navigator.onLine !== false;
+          loadAndPlayAudioSource(streamUrl, resumeSec, {
+            forceNetwork: hadError && isOnlineNow,
+            bypassSw: hadError && isOnlineNow,
+          });
+          return;
         }
         audioRef.current.playbackRate = speed;
         const playPromise = audioRef.current.play();
@@ -492,17 +758,74 @@ export function AudioPlayerProvider({ children }) {
     }
   };
 
+  // Register Offline-First Audio Chunk Cache SW & request persistent storage (prevents browser eviction up to 750MB)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker
+        .register("/sw-audio-cache.js", { scope: "/" })
+        .catch(() => {
+          // Ignore if SW registration is blocked in private mode
+        });
+    }
+    if (navigator.storage && typeof navigator.storage.persist === "function") {
+      navigator.storage.persist().catch(() => {
+        // Ignore if browser denies persistent storage
+      });
+    }
+    // Listen for network coming back online -> automatically resume/recover audio playback
+    const onOnline = () => {
+      setAudioError(null);
+      networkRetryRef.current = 0;
+      const a = audioRef.current;
+      const streamUrl =
+        loadedStreamKeyRef.current ||
+        (currentTrackRef.current ? formatAudioUrl(currentTrackRef.current.url) : "");
+      if (a && streamUrl && currentTrackRef.current && (a.error || a.readyState === 0)) {
+        const resumeAt = a.currentTime || 0;
+        if (loadAndPlayAudioSourceRef.current) {
+          loadAndPlayAudioSourceRef.current(streamUrl, resumeAt, {
+            forceNetwork: true,
+            bypassSw: true,
+            autoPlay: true,
+          });
+        }
+      }
+    };
+    window.addEventListener("online", onOnline);
+
+    return () => {
+      window.removeEventListener("online", onOnline);
+    };
+  }, []);
+
   // HTML5 audio event handlers attached to off-DOM Audio instance (so no <audio> tag appears in DOM inspector)
   useEffect(() => {
     if (typeof window === "undefined") return;
     const audio = new window.Audio();
-    audio.preload = "metadata";
+    audio.preload = "auto"; // Pre-buffer ahead like YouTube
     audioRef.current = audio;
+
+    const updateBuffered = () => {
+      try {
+        if (audio.buffered && audio.buffered.length > 0) {
+          let maxEnd = 0;
+          for (let i = 0; i < audio.buffered.length; i++) {
+            const end = audio.buffered.end(i);
+            if (end > maxEnd) maxEnd = end;
+          }
+          setBufferedTime(maxEnd);
+        }
+      } catch {
+        // Ignore
+      }
+    };
 
     const onLoadedMetadata = () => {
       if (audio.duration && !isNaN(audio.duration)) {
         setDuration(audio.duration);
       }
+      updateBuffered();
       if (pendingResumeTimeRef.current && pendingResumeTimeRef.current > 0) {
         const targetTime = pendingResumeTimeRef.current;
         pendingResumeTimeRef.current = null;
@@ -518,6 +841,21 @@ export function AudioPlayerProvider({ children }) {
       if (audio.duration && !isNaN(audio.duration)) {
         setDuration(audio.duration);
       }
+      updateBuffered();
+
+      // If playing a specific saved clip segment (from -> to), auto-pause at clip end!
+      if (
+        activeClipEndRef.current !== null &&
+        audio.currentTime >= activeClipEndRef.current
+      ) {
+        audio.pause();
+        setIsPlaying(false);
+        activeClipEndRef.current = null;
+        setActiveClipEndSec(null);
+        setActiveClipId(null);
+        return;
+      }
+
       const now = Date.now();
       if (
         currentTrackRef.current &&
@@ -534,20 +872,82 @@ export function AudioPlayerProvider({ children }) {
       }
     };
 
-    const onError = () => {
+    const onError = async () => {
       if (!audio.src) return;
+
+      const streamUrl = loadedStreamKeyRef.current;
+      const isOnlineNow = typeof navigator === "undefined" || navigator.onLine !== false;
+      const resumeAt = audio.currentTime || 0;
+
+      // Case A: A cached `blob:` URL failed while online (e.g. truncated/corrupt offline blob)
+      // -> Invalidate bad cache entry and seamlessly recover from live server stream!
+      if (streamUrl && audio.src.startsWith("blob:") && isOnlineNow && networkRetryRef.current < 1) {
+        networkRetryRef.current += 1;
+        await invalidateOfflineCachedAudio(streamUrl);
+        if (loadAndPlayAudioSourceRef.current) {
+          loadAndPlayAudioSourceRef.current(streamUrl, resumeAt, {
+            forceNetwork: true,
+            bypassSw: true,
+            autoPlay: true,
+          });
+          return;
+        }
+      }
+
+      // Case B: Streaming `/api/stream?t=...` failed while OFFLINE
+      // -> Seamlessly switch to our IndexedDB blob: URL!
+      if (streamUrl && !audio.src.startsWith("blob:") && !isOnlineNow) {
+        const cached = await getOfflineCachedAudioUrl(streamUrl);
+        if (cached && cached.url) {
+          pendingResumeTimeRef.current = resumeAt > 0 ? resumeAt : null;
+          audio.src = cached.url;
+          audio.load();
+          audio.play().then(() => {
+            setIsPlaying(true);
+            setAudioError(null);
+          }).catch(() => {
+            setIsPlaying(false);
+          });
+          return;
+        }
+      }
+
+      // Case C: Streaming `/api/stream?t=...` failed while ONLINE (e.g. stale SW 503 after offline reload)
+      // -> Retry once bypassing Service Worker directly to `/api/stream?t=...&bypass_sw=1`!
+      if (streamUrl && !audio.src.startsWith("blob:") && isOnlineNow && networkRetryRef.current < 1) {
+        networkRetryRef.current += 1;
+        if (loadAndPlayAudioSourceRef.current) {
+          loadAndPlayAudioSourceRef.current(streamUrl, resumeAt, {
+            forceNetwork: true,
+            bypassSw: true,
+            autoPlay: true,
+          });
+          return;
+        }
+      }
+
       setIsPlaying(false);
-      setAudioError("অডিও ফাইলটি প্লে করা যাচ্ছে না। লিংক বা ইন্টারনেট সংযোগ পরীক্ষা করুন।");
+      if (!isOnlineNow) {
+        setAudioError(
+          "ইন্টারনেট সংযোগ নেই — তবে আগে বাফার/ক্যাশ হওয়া অংশটুকু সিক করে অফলাইনে শুনতে পারবেন।"
+        );
+      } else {
+        setAudioError("অডিও ফাইলটি প্লে করা যাচ্ছে না। লিংক বা ইন্টারনেট সংযোগ পরীক্ষা করুন।");
+      }
     };
 
     audio.addEventListener("loadedmetadata", onLoadedMetadata);
     audio.addEventListener("timeupdate", onTimeUpdate);
+    audio.addEventListener("progress", updateBuffered);
+    audio.addEventListener("canplay", updateBuffered);
     audio.addEventListener("error", onError);
 
     return () => {
       audio.pause();
       audio.removeEventListener("loadedmetadata", onLoadedMetadata);
       audio.removeEventListener("timeupdate", onTimeUpdate);
+      audio.removeEventListener("progress", updateBuffered);
+      audio.removeEventListener("canplay", updateBuffered);
       audio.removeEventListener("error", onError);
     };
   }, []);
@@ -578,6 +978,7 @@ export function AudioPlayerProvider({ children }) {
         isPlaying,
         currentTime,
         duration: duration || currentTrack?.durationSec || 1800,
+        bufferedTime,
         speed,
         volume,
         isFullPlayerOpen,
@@ -605,6 +1006,13 @@ export function AudioPlayerProvider({ children }) {
         recordBookReadingProgress,
         getBookReadingProgress,
         removeHistoryItem,
+        audioClips,
+        activeClipId,
+        activeClipEndSec,
+        addAudioClip,
+        removeAudioClip,
+        getClipsForBook,
+        playClipSegment,
       }}
     >
       {children}
