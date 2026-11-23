@@ -197,3 +197,35 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
   - `GET /api/engagement?targetType=AUDIOBOOK|EBOOK&targetId=<docId>` — লাইক সংখ্যা, গড় রেটিং, ইউজারের নিজের লাইক/রেটিং ও কমেন্ট লিস্ট রিটার্ন করে।
   - `POST /api/engagement` — লগইনকৃত ইউজারের জন্য `action`: `"like"` | `"rating"` | `"comment"` | `"delete_comment"`।
 - **Firebase ➔ Neon সিঙ্ক স্ক্রিপ্ট:** `node scripts/sync-firebase-to-neon.mjs` — Firestore-এর সব কালেকশন (`categories`, `writer`, `books` + নেস্টেড ট্র্যাক, `shortStory`) Neon PostgreSQL-এ মিরর/আপসার্ট করে।
+
+---
+
+## ৭. Server-Side Audio Playback Rate Limiting (৩০ মিনিট Sliding Window — সর্বোচ্চ ৬টি অডিও)
+
+> **লক্ষ্য:** সার্ভার ও ব্যান্ডউইথ অ্যাবিউজ রোধ করা (কোনো Firebase read/write ছাড়াই), যাতে প্রতি ইউজার ৩০ মিনিটের Sliding Window-তে সর্বোচ্চ **৬টি আলাদা অডিও** চালু করতে পারে।
+
+### ক. আর্কিটেকচার ও ফাইলসমূহ:
+1. **ডাটাবেস (`prisma/schema.prisma` ➔ `audio_play_grants` টেবিল):**
+   - ফিল্ড: `actorKey` (`user:<userId>` বা `guest:<deviceId>`), `audioKey` (ক্যানোনিকাল SHA-256 হ্যাশ), `ipHash`, `grantedAt`, `expiresAt` (`grantedAt + 30m`)।
+   - সার্ভার রিস্টার্ট বা Vercel serverless cold-start হলেও স্টেট কখনো হারায় না।
+2. **কোর ইঞ্জিন (`lib/playbackRateLimit.js`):**
+   - **Atomic Concurrency Control:** Prisma `$transaction`-এর ভেতরে PostgreSQL-এর `pg_advisory_xact_lock(hashtext(actorKey))` (এবং গেস্টের জন্য `ipHash` লক) ব্যবহার করা হয়, ফলে একই মিলিসেকেন্ডে ১০টি কনকারেন্ট রিকোয়েস্ট এলেও কঠোরভাবে সর্বোচ্চ **৬টি** অনুমোদিত হয়।
+   - **User & Guest Identity + Role Exemption + Multi-Device Policy:**
+     - **সীমার আওতায়:** শুধু **Guest ইউজার** (`guest:<deviceId>`) এবং সাধারণ **`USER` রোল** (কোনো স্টাফ রোল ছাড়া) ৩০ মিনিটে সর্বোচ্চ ৬টি অডিও সীমার আওতায় থাকবে।
+     - **সীমামুক্ত (Exempt Roles):** `SUPER_ADMIN`, `ADMIN`, `EDITOR`, `ARTIST` রোলগুলো ৬টি অডিওর লিমিট থেকে মুক্ত (`x: 1` সাইনড কুকি)।
+     - **মাল্টি-ডিভাইস:** একই `USER` অ্যাকাউন্টে একাধিক ডিভাইস থেকে লগইন করলে **একই ৬টি/৩০ মিনিট কোটা শেয়ার হয়** (অনুমোদিত ৬টি অডিও যেকোনো ডিভাইসে পুনরায় শোনা যায়)।
+     - **গেস্ট ইউজার (`guest:<deviceId>`):** সার্ভার-ইস্যুকৃত HMAC-সাইনড HttpOnly কুকি (`gj_did`, ১ বছর মেয়াদ) + কুকি ক্লিয়ারিং অ্যাবিউজ ঠেকাতে সেকেন্ডারি IP-ভিত্তিক সীমা (`GUEST_IP_MAX_UNIQUE = 12` / ৩০ মিনিট)।
+     - **লিমিট পপআপ:** ৬টির বেশি অডিও প্লে করার চেষ্টা করলে ইংরেজিতে পপআপ মডাল দেখায় (`"Sorry, you cannot play more than 6 audio tracks within 30 minutes. Please request a new audio after 30 minutes."`) এবং পরবর্তী অনুমতির সময় দেখায়।
+   - **Zero-DB Stream Verification & 2-Layer Short-Circuit (`gj_pb_grants` + `gj_rl_hint_v1`):**
+     - **লেয়ার ১ (ক্লায়েন্ট শর্ট-সার্কিট):** ৬ষ্ঠ অডিও অনুমোদিত হওয়ার সাথে সাথেই `remaining === 0` দেখে `rateLimitLockRef` ও `sessionStorage` (`gj_rl_hint_v1`) প্রি-আর্ম হয়ে যায় — ফলে ৭ম, ৮ম, ৯ম ক্লিকে **০টি Vercel ইনভোকেশন ও ০টি Neon DB কুয়েরি** করেই সাথে সাথে `Listen Later` + `Recent` পপআপ দেখায়।
+     - **লেয়ার ২ (সার্ভার জিরো-DB শর্ট-সার্কিট):** কেউ পেজ রিলোড বা ক্লায়েন্ট বাইপাস করলেও `shortCircuitFromSignedGrantsCookie()` সাইনড HttpOnly `gj_pb_grants` কুকি স্টেটলেস O(1) মেমোরিতে পড়ে (০ RAM ম্যাপ, ০ Neon DB কুয়েরি) আগে অনুমোদিত অডিওকে `200` অথবা ৬/৬ পূর্ণ হলে সরাসরি `429` রিটার্ন করে।
+     - `/api/stream/route.js` শুধু `gj_pb_grants` কুকি মেমোরিতে ভেরিফাই করে (০টি DB/Firebase রিড)।
+3. **API এন্ডপয়েন্ট (`app/api/audio/play-permission/route.js`):**
+   - `POST /api/audio/play-permission` — নতুন অডিও চালানোর অনুমতি দেয় (`200 OK`) অথবা সীমা পূর্ণ হলে **HTTP `429`** + `Retry-After` হেডার + `nextAvailableAt` রিটার্ন করে।
+   - `GET /api/audio/play-permission` — বর্তমান কোটা স্ট্যাটাস (`used`, `remaining`, `nextAvailableAt`) রিটার্ন করে।
+4. **ক্লায়েন্ট ও ক্যাশ কম্প্যাটিবিলিটি (`context/AudioPlayerContext.js` ও `app/api/stream/route.js`):**
+   - **Zero Unnecessary Calls:**
+     - IndexedDB থেকে ক্যাশড/অফলাইন অডিও (`blob:` URL) চললে কোনো `/api/audio/play-permission` কল হয় না।
+     - একই উইন্ডোতে আগে অনুমোদিত অডিও `grantedStreamsRef`-এ থাকায় Pause, Resume, Seek, Prev/Next বা Clip প্লে করলে নতুন API কল বা নতুন কাউন্ট হয় না।
+     - HTTP Range Request, অডিও চাঙ্ক, বাফারিং, রিট্রাই ও Service Worker (`sw-audio-cache.js` v3) প্রিফেচ কখনো নতুন Play হিসেবে গণনা হয় না।
+   - **টেস্ট স্ক্রিপ্ট:** `node scripts/test-playback-rate-limit.mjs` — লাইভ Neon-এ কনকারেন্সি (১০টি সমান্তরাল রিকোয়েস্টে ৬ অনুমোদন / ৪ ব্লক), রিইউজ এবং স্লাইডিং উইন্ডো এক্সপায়ারি যাচাই করে।

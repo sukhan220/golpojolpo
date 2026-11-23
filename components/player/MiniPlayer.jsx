@@ -28,6 +28,7 @@ export default function MiniPlayer({ isPlayerViewActive }) {
     playlist,
     playlistIndex,
     isPlaying,
+    isBuffering,
     currentTime,
     duration,
     togglePlay,
@@ -297,14 +298,20 @@ export default function MiniPlayer({ isPlayerViewActive }) {
             <Backward10Icon size={19} />
           </button>
 
-          {/* Play / Pause */}
+          {/* Play / Pause / Loading */}
           <button
             className="pp"
-            aria-label={isPlaying ? "Pause" : "Play"}
-            title={isPlaying ? "পজ করুন" : "প্লে করুন"}
+            aria-label={isBuffering ? "Loading" : isPlaying ? "Pause" : "Play"}
+            title={isBuffering ? "লোড হচ্ছে..." : isPlaying ? "পজ করুন" : "প্লে করুন"}
             onClick={togglePlay}
           >
-            {isPlaying ? <PauseIcon size={18} /> : <PlayIcon size={18} />}
+            {isBuffering ? (
+              <span className="gj-play-spinner" aria-hidden="true" />
+            ) : isPlaying ? (
+              <PauseIcon size={18} />
+            ) : (
+              <PlayIcon size={18} />
+            )}
           </button>
 
           {/* 10s Forward (always shown) */}

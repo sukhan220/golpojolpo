@@ -1,11 +1,24 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import { SearchIcon, UserIcon } from "../Icons";
 import { useAuth } from "../../context/AuthContext";
+import { useAudioPlayer } from "../../context/AudioPlayerContext";
 
-export default function Header({ onOpenSearch, onToggleProfile, title }) {
+export default function Header({ onOpenSearch, onToggleProfile, onOpenRecent, title }) {
   const { user } = useAuth();
+  const { recentPlaylistTracks = [] } = useAudioPlayer();
+  const [recentImgErr, setRecentImgErr] = useState(false);
+
+  const firstRecent = recentPlaylistTracks[0] || null;
+
+  const handleOpenRecent = () => {
+    if (typeof onOpenRecent === "function") {
+      onOpenRecent();
+    } else if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("golpojolpo:open-recent-playlist"));
+    }
+  };
 
   return (
     <div className="top">
@@ -20,7 +33,29 @@ export default function Header({ onOpenSearch, onToggleProfile, title }) {
         />
       )}
 
-      <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+        {/* Compact Recent 6 Playlist Pill next to Search */}
+        <button
+          type="button"
+          className="recent-nav-pill"
+          onClick={handleOpenRecent}
+          aria-label="Recent Playlist"
+          title="Recent (সর্বশেষ ৬টি অডিও)"
+        >
+          <span className="recent-nav-thumb">
+            {firstRecent?.artwork && !recentImgErr ? (
+              <img
+                src={firstRecent.artwork}
+                alt={firstRecent.title || "Recent"}
+                onError={() => setRecentImgErr(true)}
+              />
+            ) : (
+              <span>{firstRecent?.letter || "র"}</span>
+            )}
+          </span>
+          <span className="recent-nav-label">Recent</span>
+        </button>
+
         <button
           aria-label="Search"
           onClick={onOpenSearch}

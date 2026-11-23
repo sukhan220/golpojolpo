@@ -195,3 +195,20 @@ model Rating {
   @@index([targetType, targetId])
   @@map("ratings")
 }
+
+// -------------------------------------------------------------
+// 7. Server-Side Audio Playback Rate Limiting (30m Sliding Window)
+// -------------------------------------------------------------
+model AudioPlayGrant {
+  id        String   @id @default(cuid())
+  actorKey  String   // "user:<userId>" or "guest:<deviceId>"
+  audioKey  String   // Canonical audio token hash (SHA-256)
+  ipHash    String?  // Hashed client IP for guest abuse protection
+  grantedAt DateTime @default(now())
+  expiresAt DateTime // grantedAt + 30 minutes
+
+  @@unique([actorKey, audioKey])
+  @@index([actorKey, expiresAt])
+  @@index([ipHash, expiresAt])
+  @@map("audio_play_grants")
+}

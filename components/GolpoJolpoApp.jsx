@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { DataService } from "../lib/dataService";
 import {
   AudioPlayerProvider,
@@ -9,6 +9,7 @@ import {
 import { AuthProvider } from "../context/AuthContext";
 import Navigation from "./layout/Navigation";
 import ProfileDialog from "./layout/ProfileDialog";
+import PullToRefresh from "./layout/PullToRefresh";
 import MiniPlayer from "./player/MiniPlayer";
 import PlayerView from "./player/PlayerView";
 import HomeView from "./views/HomeView";
@@ -21,6 +22,8 @@ import MagazineView from "./views/MagazineView";
 import SearchView from "./views/SearchView";
 import EBookDetailView from "./views/EBookDetailView";
 import EBookReaderModal from "./views/EBookReaderModal";
+import PlaylistsView from "./views/PlaylistsView";
+import PlaylistDetailView from "./views/PlaylistDetailView";
 import ReaderApp from "./ReaderAppWrapper";
 import {
   MOCK_CATEGORIES,
@@ -45,10 +48,25 @@ function MainApp() {
   const [selectedBook, setSelectedBook] = useState(null);
   const [selectedWriter, setSelectedWriter] = useState(null);
   const [selectedStory, setSelectedStory] = useState(null);
+  const [selectedPlaylistId, setSelectedPlaylistId] = useState(null);
   const [isReaderModalOpen, setIsReaderModalOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const mainRef = useRef(null);
 
-  const { isFullPlayerOpen, closeFullPlayer, openFullPlayer, syncInitialTrack } = useAudioPlayer();
+  const {
+    isFullPlayerOpen,
+    closeFullPlayer,
+    openFullPlayer,
+    syncInitialTrack,
+    rateLimitPopup,
+    dismissRateLimitPopup,
+    addTrackToListenLater,
+  } = useAudioPlayer();
+  const [listenLaterAdded, setListenLaterAdded] = useState(false);
+
+  useEffect(() => {
+    setListenLaterAdded(false);
+  }, [rateLimitPopup]);
 
   // Load from Cache first (only hits Firebase once if cache is empty) + sync with Reverse API on focus
   useEffect(() => {
@@ -77,7 +95,7 @@ function MainApp() {
     };
   }, []);
 
-  // Listen to hash change for browser back/forward support
+  // Listen to hash change for browser back/forward support (mount-only!)
   useEffect(() => {
     const handleHash = () => {
       const hash = window.location.hash.slice(1);
@@ -88,6 +106,23 @@ function MainApp() {
     if (window.location.hash) handleHash();
     window.addEventListener("hashchange", handleHash);
     return () => window.removeEventListener("hashchange", handleHash);
+  }, []);
+
+  // Open Recent 6 Playlist when Navbar Recent pill is clicked (isolated from hashchange!)
+  useEffect(() => {
+    const handleOpenRecentPlaylist = () => {
+      setSelectedPlaylistId("__recent__");
+      setRoute((prevRoute) => {
+        if (prevRoute !== "player" && prevRoute !== "playlist") {
+          setHistory((prevHist) => [...prevHist, prevRoute]);
+        }
+        return "playlist";
+      });
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    };
+    window.addEventListener("golpojolpo:open-recent-playlist", handleOpenRecentPlaylist);
+    return () =>
+      window.removeEventListener("golpojolpo:open-recent-playlist", handleOpenRecentPlaylist);
   }, []);
 
   const navigateTo = (newRoute) => {
@@ -190,7 +225,11 @@ function MainApp() {
         }}
       />
 
-      <main>
+      <main ref={mainRef}>
+        <PullToRefresh
+          containerRef={mainRef}
+          onRefresh={() => DataService.syncWithReverseApi()}
+        />
         {route === "home" && (
           <HomeView
             categories={categories}
@@ -202,6 +241,27 @@ function MainApp() {
             onOpenSearch={() => navigateTo("search")}
             onToggleProfile={() => setIsProfileOpen(!isProfileOpen)}
             onSelectCategory={handleSelectCategory}
+            onOpenPlaylists={() => navigateTo("playlists")}
+          />
+        )}
+
+        {route === "playlists" && (
+          <PlaylistsView
+            onBack={() => handleGoBack("home")}
+            onOpenPlaylist={(plId) => {
+              setSelectedPlaylistId(plId);
+              navigateTo("playlist");
+            }}
+          />
+        )}
+
+        {route === "playlist" && (
+          <PlaylistDetailView
+            playlistId={selectedPlaylistId}
+            onBack={() =>
+              handleGoBack(selectedPlaylistId === "__recent__" ? "home" : "playlists")
+            }
+            onOpenSearch={() => navigateTo("search")}
           />
         )}
 
@@ -298,6 +358,77 @@ function MainApp() {
         isOpen={isProfileOpen}
         onClose={() => setIsProfileOpen(false)}
       />
+
+      {/* Audio Playback Rate-Limit Popup Modal (English) */}
+      {rateLimitPopup && (
+        <div
+          className="rl-modal-bg"
+          role="dialog"
+          aria-modal="true"
+          aria-label={rateLimitPopup.title || "Playback Limit Reached"}
+          onClick={dismissRateLimitPopup}
+        >
+          <div className="rl-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="rl-modal-icon" aria-hidden="true">
+              <svg
+                width="24"
+                height="24"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="12 6 12 12 16 14" />
+              </svg>
+            </div>
+            <h3>{rateLimitPopup.title}</h3>
+            <p>{rateLimitPopup.message}</p>
+            {rateLimitPopup.suggestion && (
+              <p className="rl-modal-suggest">{rateLimitPopup.suggestion}</p>
+            )}
+            {rateLimitPopup.nextAvailableText && (
+              <div className="rl-modal-meta">{rateLimitPopup.nextAvailableText}</div>
+            )}
+            <div className="rl-modal-actions">
+              {rateLimitPopup.blockedTrack && (
+                <button
+                  type="button"
+                  className="rl-modal-btn"
+                  disabled={listenLaterAdded}
+                  onClick={() => {
+                    addTrackToListenLater(rateLimitPopup.blockedTrack);
+                    setListenLaterAdded(true);
+                  }}
+                >
+                  {listenLaterAdded ? "Added to Listen Later ✓" : "+ Add to Listen Later"}
+                </button>
+              )}
+              <button
+                type="button"
+                className="rl-modal-btn secondary"
+                onClick={() => {
+                  dismissRateLimitPopup();
+                  if (route === "player") closeFullPlayer();
+                  setSelectedPlaylistId("__recent__");
+                  navigateTo("playlist");
+                }}
+              >
+                Open Recent Playlist
+              </button>
+              <button
+                type="button"
+                className="rl-modal-close"
+                onClick={dismissRateLimitPopup}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* E-Book Reader Modal */}
       {isReaderModalOpen && (

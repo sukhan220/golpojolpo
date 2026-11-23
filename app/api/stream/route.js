@@ -1,11 +1,20 @@
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { decryptAudioToken } from "../../../lib/audioCrypto";
+import {
+  GRANTS_COOKIE_NAME,
+  verifyAudioStreamGrantCookie,
+} from "../../../lib/playbackRateLimit";
 
 /**
  * GET /api/stream?t=<encrypted_token> OR /api/stream?url=<external_url>
  *
  * Decrypts the audio token (or proxies an external eBook/text URL) on the server
  * to avoid CORS errors and hide raw Dropbox/external URLs.
+ *
+ * For audio streams (`?t=<token>`):
+ * - Verifies the HMAC-signed HttpOnly `gj_pb_grants` cookie in O(1) memory (ZERO DB hits!).
+ * - Range requests, chunks, buffering, retries, and SW prefetches NEVER count as new plays.
  */
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
@@ -14,6 +23,15 @@ export async function GET(request) {
 
   let targetUrl = "";
   if (token) {
+    // Enforce server-side playback grant verification in-memory (0 DB / 0 Firebase reads)
+    const cookieStore = await cookies();
+    const grantCookie = cookieStore.get(GRANTS_COOKIE_NAME)?.value;
+    if (!verifyAudioStreamGrantCookie(grantCookie, token)) {
+      return NextResponse.json(
+        { error: "Playback permission required or expired" },
+        { status: 403, headers: { "Cache-Control": "no-store" } }
+      );
+    }
     targetUrl = decryptAudioToken(token) || "";
   } else if (rawUrlParam) {
     // Reconstruct the full external URL from the raw query string so unencoded '&' parameters

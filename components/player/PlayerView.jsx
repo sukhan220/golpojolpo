@@ -27,6 +27,7 @@ export default function PlayerView({ onBack }) {
     playlist,
     playlistIndex,
     isPlaying,
+    isBuffering,
     currentTime,
     duration,
     bufferedTime,
@@ -331,9 +332,15 @@ export default function PlayerView({ onBack }) {
             <button
               className="pp"
               onClick={togglePlay}
-              aria-label={isPlaying ? "Pause" : "Play"}
+              aria-label={isBuffering ? "Loading" : isPlaying ? "Pause" : "Play"}
             >
-              {isPlaying ? <PauseIcon size={26} /> : <PlayIcon size={26} />}
+              {isBuffering ? (
+                <span className="gj-play-spinner lg" aria-hidden="true" />
+              ) : isPlaying ? (
+                <PauseIcon size={26} />
+              ) : (
+                <PlayIcon size={26} />
+              )}
             </button>
 
             <button

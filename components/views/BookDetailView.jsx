@@ -19,6 +19,7 @@ export default function BookDetailView({ book, onBack, backLabel = "Back" }) {
   const {
     currentTrack,
     isPlaying,
+    isBuffering,
     playTrack,
     togglePlay,
     openFullPlayer,
@@ -41,6 +42,7 @@ export default function BookDetailView({ book, onBack, backLabel = "Back" }) {
   // Listen to nested subcollections (e.g. books/{id}/tracks, chapters, episodes, parts)
   useEffect(() => {
     setImageFailed(false);
+    setNestedTracks(book?.tracks || []);
     const unsub = DataService.listenBookNestedTracks(book, (tracks) => {
       setNestedTracks(tracks || []);
     });
@@ -66,11 +68,13 @@ export default function BookDetailView({ book, onBack, backLabel = "Back" }) {
 
   const isCurrentBookLoaded =
     !currentTrack?.isMock &&
-    Boolean(currentTrack?.url) &&
-    (currentTrack?.url === targetFirstTrack?.url ||
-      nestedTracks.some((t) => !t.isMock && t.url && t.url === currentTrack?.url));
+    Boolean(currentTrack?.id) &&
+    (currentTrack.id === book.id ||
+      (currentTrack.bookId && currentTrack.bookId === book.id) ||
+      nestedTracks.some((t) => !t.isMock && t.id && t.id === currentTrack.id));
 
   const isCurrentBookPlaying = isPlaying && isCurrentBookLoaded;
+  const isCurrentBookBuffering = isBuffering && isCurrentBookLoaded;
 
   // Play or Pause main book / first track in nested collection
   const handlePlayNow = () => {
@@ -189,8 +193,17 @@ export default function BookDetailView({ book, onBack, backLabel = "Back" }) {
 
           <div className="detail-action">
             <button className="btn" onClick={handlePlayNow}>
-              {isCurrentBookPlaying ? <PauseIcon size={18} /> : <PlayIcon size={18} />}
-              {isCurrentBookPlaying ? "Pause" : "Play Now"}
+              {isCurrentBookBuffering ? (
+                <>
+                  <span className="gj-play-spinner" aria-hidden="true" />
+                  লোড হচ্ছে...
+                </>
+              ) : (
+                <>
+                  {isCurrentBookPlaying ? <PauseIcon size={18} /> : <PlayIcon size={18} />}
+                  {isCurrentBookPlaying ? "Pause" : "Play Now"}
+                </>
+              )}
             </button>
           </div>
 

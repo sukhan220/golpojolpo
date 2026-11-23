@@ -22,6 +22,7 @@ export default function HomeView({
   onOpenSearch,
   onToggleProfile,
   onSelectCategory,
+  onOpenPlaylists,
 }) {
   const [activeChip, setActiveChip] = useState(null);
   const [isScrolled, setIsScrolled] = useState(false);
@@ -178,7 +179,11 @@ export default function HomeView({
 
   const handleCollectionClick = (name) => {
     if (name === "PlayLists") {
-      setShowPlaylistsModal(true);
+      if (typeof onOpenPlaylists === "function") {
+        onOpenPlaylists();
+      } else {
+        setShowPlaylistsModal(true);
+      }
     } else if (name === "History") {
       setShowHistoryModal(true);
     } else if (name === "Favorites") {
