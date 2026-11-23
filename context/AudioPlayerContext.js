@@ -616,10 +616,11 @@ export function AudioPlayerProvider({ children }) {
     }
 
     // If not completely cached yet and we're online, progressively cache into IndexedDB
+    // and seamlessly hot-swap `<audio>` to the local `blob:` URL once complete so ZERO further 206 requests hit Vercel!
     if (!cachedInfo?.complete && !isOfflineNow) {
       cacheAudioInBackground(
         streamUrl,
-        ({ loadedBytes, totalBytes, complete }) => {
+        ({ loadedBytes, totalBytes, complete, blobUrl }) => {
           if (
             !isMountedRef.current ||
             sourceTokenRef.current !== loadToken ||
@@ -634,6 +635,38 @@ export function AudioPlayerProvider({ children }) {
               bgCacheCompleteRef.current = Boolean(complete);
               bgCacheBufferedRef.current = complete ? estDur : ratio * estDur;
               recomputeBufferedTime();
+            }
+          }
+
+          // Seamless hot-swap: once full file is in IndexedDB, switch `<audio>` to local `blob:` URL
+          // to stop all ongoing browser 206 Range requests to `/api/stream`!
+          if (
+            complete &&
+            blobUrl &&
+            audioRef.current === audio &&
+            !String(audio.src || "").startsWith("blob:")
+          ) {
+            const livePos =
+              Number.isFinite(audio.currentTime) && audio.currentTime > 0
+                ? audio.currentTime
+                : currentTimeRef.current || 0;
+            const wasPlaying = !audio.paused && wantPlayingRef.current;
+            const swapToken = ++sourceTokenRef.current;
+
+            pendingResumeTimeRef.current = livePos > 0 ? livePos : null;
+            usingPartialBlobRef.current = false;
+            activeAudioSrcRef.current = normalizeComparableUrl(blobUrl);
+            audio.__gjLoadToken = swapToken;
+            audio.src = blobUrl;
+            audio.playbackRate = speedRef.current;
+            audio.volume = Math.max(0, Math.min(1, volumeRef.current / 100));
+            audio.load();
+
+            if (wasPlaying) {
+              const p = audio.play();
+              if (p !== undefined) {
+                p.catch(() => {});
+              }
             }
           }
         },
