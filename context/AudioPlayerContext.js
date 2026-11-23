@@ -1642,7 +1642,7 @@ export function AudioPlayerProvider({ children }) {
     ownerIdRef.current = mountOwnerId;
 
     const audio = new window.Audio();
-    audio.preload = "auto";
+    audio.preload = "metadata"; // Avoid aggressive 206 bursts; lib/audioOfflineCache caches full track in 1 clean request
     audio.__gjLoadToken = -1;
     audioRef.current = audio;
 

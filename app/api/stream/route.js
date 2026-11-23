@@ -108,7 +108,7 @@ export async function GET(request) {
       responseHeaders.set("Content-Range", contentRange);
     }
 
-    responseHeaders.set("Cache-Control", "private, max-age=3600");
+    responseHeaders.set("Cache-Control", "private, max-age=86400, immutable");
 
     return new Response(upstream.body, {
       status: upstream.status,
