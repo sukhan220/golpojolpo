@@ -7,6 +7,7 @@ import {
   cacheAudioInBackground,
   invalidateOfflineCachedAudio,
   releaseOfflineAudioOwner,
+  abortOtherBackgroundCaches,
 } from "../lib/audioOfflineCache";
 
 const AudioPlayerContext = createContext(null);
@@ -360,6 +361,9 @@ export function AudioPlayerProvider({ children }) {
     const loadToken = ++sourceTokenRef.current;
     const safeResume = Number.isFinite(Number(resumeSec)) && Number(resumeSec) > 0 ? Number(resumeSec) : 0;
 
+    // Stop any previous track's unfinished background download immediately (saves Vercel bandwidth!)
+    abortOtherBackgroundCaches(streamUrl, ownerIdRef.current);
+
     // Show brief, smooth loading spinner on Play button (both online & offline) before starting new track
     audio.pause();
     setIsPlaying(false);
@@ -383,6 +387,8 @@ export function AudioPlayerProvider({ children }) {
     const useBlob = !forceNetwork && cachedInfo && (cachedInfo.complete || isOfflineNow);
     usingPartialBlobRef.current = Boolean(useBlob && cachedInfo && !cachedInfo.complete);
 
+    let resolvedDirectUrl = null;
+
     // Server-side 30-minute sliding window rate limit check (max 6 unique audios):
     // - SKIPPED when playing from already-cached IndexedDB blob (zero unnecessary API calls!)
     // - SKIPPED when streamUrl already has a valid in-memory grant in the current window
@@ -390,12 +396,18 @@ export function AudioPlayerProvider({ children }) {
     if (!useBlob && !isOfflineNow && streamUrl.startsWith("/api/stream?t=")) {
       const nowMs = Date.now();
       // Prune expired entries from grantedStreamsRef to keep memory tiny
-      for (const [k, exp] of grantedStreamsRef.current.entries()) {
+      for (const [k, entry] of grantedStreamsRef.current.entries()) {
+        const exp = typeof entry === "number" ? entry : entry?.expMs;
         if (!exp || exp <= nowMs) grantedStreamsRef.current.delete(k);
       }
 
-      const existingExp = grantedStreamsRef.current.get(streamUrl);
+      const existingGrant = grantedStreamsRef.current.get(streamUrl);
+      const existingExp =
+        typeof existingGrant === "number" ? existingGrant : existingGrant?.expMs;
       const hasValidSession = Boolean(existingExp && nowMs < existingExp - 10000);
+      if (hasValidSession && existingGrant?.directUrl) {
+        resolvedDirectUrl = existingGrant.directUrl;
+      }
 
       if (!hasValidSession) {
         // Hydrate tiny sessionStorage hint once if memory lock is empty (handles page reload without hitting server!)
@@ -511,7 +523,12 @@ export function AudioPlayerProvider({ children }) {
             const expMs = permData.expiresAt
               ? new Date(permData.expiresAt).getTime()
               : Date.now() + 29 * 60 * 1000;
-            grantedStreamsRef.current.set(streamUrl, expMs);
+            const directR2Url =
+              typeof permData.directUrl === "string" && permData.directUrl.startsWith("https://")
+                ? permData.directUrl
+                : null;
+            resolvedDirectUrl = directR2Url;
+            grantedStreamsRef.current.set(streamUrl, { expMs, directUrl: directR2Url });
 
             // If this 6th track just filled the 6/6 window (non-exempt), pre-arm the client lock
             // so even the VERY FIRST 7th click triggers popup locally with 0 server/DB hits!
@@ -560,7 +577,9 @@ export function AudioPlayerProvider({ children }) {
       );
     }
 
-    const playSrc = useBlob ? cachedInfo.url : buildDirectStreamUrl(streamUrl, bypassSw);
+    const playSrc = useBlob
+      ? cachedInfo.url
+      : resolvedDirectUrl || buildDirectStreamUrl(streamUrl, bypassSw);
 
     try {
       audio.pause();
@@ -670,7 +689,8 @@ export function AudioPlayerProvider({ children }) {
             }
           }
         },
-        ownerId
+        ownerId,
+        resolvedDirectUrl
       ).catch(() => {});
     }
   };

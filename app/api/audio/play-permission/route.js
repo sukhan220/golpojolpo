@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { decryptAudioToken } from "../../../../lib/audioCrypto";
+import {
+  createR2PresignedGetUrl,
+  extractR2ObjectKey,
+} from "../../../../lib/r2Signer";
 import {
   canonicalizeAudioKey,
   DEVICE_COOKIE_NAME,
@@ -12,6 +17,14 @@ import {
   resolvePlaybackActor,
   shortCircuitFromSignedGrantsCookie,
 } from "../../../../lib/playbackRateLimit";
+
+function resolveDirectR2PlaybackUrl(rawInput, expiresSec = 1800) {
+  const decrypted = decryptAudioToken(rawInput);
+  if (!decrypted) return null;
+  const r2Key = extractR2ObjectKey(decrypted);
+  if (!r2Key) return null;
+  return createR2PresignedGetUrl(r2Key, expiresSec);
+}
 
 /**
  * GET /api/audio/play-permission
@@ -72,6 +85,7 @@ export async function POST(request) {
     if (actor.isExempt) {
       const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
       const signedGrants = encodeGrantsCookie(actor.actorKey, [], true);
+      const directUrl = resolveDirectR2PlaybackUrl(rawInput, 1800);
       const response = NextResponse.json(
         {
           allowed: true,
@@ -79,6 +93,7 @@ export async function POST(request) {
           role: actor.role,
           audioKey,
           expiresAt,
+          directUrl,
         },
         {
           status: 200,
@@ -122,6 +137,7 @@ export async function POST(request) {
         );
       }
 
+      const directUrl = resolveDirectR2PlaybackUrl(rawInput, 1800);
       return NextResponse.json(
         {
           allowed: true,
@@ -132,6 +148,7 @@ export async function POST(request) {
           remaining: fastResult.remaining,
           expiresAt: fastResult.expiresAt,
           nextAvailableAt: fastResult.nextAvailableAt,
+          directUrl,
         },
         {
           status: 200,
@@ -181,6 +198,7 @@ export async function POST(request) {
       return response;
     }
 
+    const directUrl = resolveDirectR2PlaybackUrl(rawInput, 1800);
     const response = NextResponse.json(
       {
         allowed: true,
@@ -191,6 +209,7 @@ export async function POST(request) {
         remaining: result.remaining,
         expiresAt: result.expiresAt,
         nextAvailableAt: result.nextAvailableAt,
+        directUrl,
       },
       {
         status: 200,

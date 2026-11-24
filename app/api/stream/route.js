@@ -2,6 +2,10 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { decryptAudioToken } from "../../../lib/audioCrypto";
 import {
+  createR2PresignedGetUrl,
+  extractR2ObjectKey,
+} from "../../../lib/r2Signer";
+import {
   GRANTS_COOKIE_NAME,
   verifyAudioStreamGrantCookie,
 } from "../../../lib/playbackRateLimit";
@@ -33,6 +37,19 @@ export async function GET(request) {
       );
     }
     targetUrl = decryptAudioToken(token) || "";
+
+    // If this audio lives in Cloudflare R2 (`r2://...`), 302 redirect to a short-lived
+    // Presigned URL so ZERO audio bytes pass through Vercel Fast Origin Transfer!
+    const r2Key = extractR2ObjectKey(targetUrl);
+    if (r2Key) {
+      const signedR2Url = createR2PresignedGetUrl(r2Key, 1800);
+      if (signedR2Url) {
+        return NextResponse.redirect(signedR2Url, {
+          status: 302,
+          headers: { "Cache-Control": "no-store" },
+        });
+      }
+    }
   } else if (rawUrlParam) {
     // Reconstruct the full external URL from the raw query string so unencoded '&' parameters
     // (such as Dropbox's &st=...&raw=1) are never stripped by searchParams.get("url")!

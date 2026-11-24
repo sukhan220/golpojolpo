@@ -229,3 +229,7 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
      - একই উইন্ডোতে আগে অনুমোদিত অডিও `grantedStreamsRef`-এ থাকায় Pause, Resume, Seek, Prev/Next বা Clip প্লে করলে নতুন API কল বা নতুন কাউন্ট হয় না।
      - HTTP Range Request, অডিও চাঙ্ক, বাফারিং, রিট্রাই ও Service Worker (`sw-audio-cache.js` v3) প্রিফেচ কখনো নতুন Play হিসেবে গণনা হয় না।
    - **টেস্ট স্ক্রিপ্ট:** `node scripts/test-playback-rate-limit.mjs` — লাইভ Neon-এ কনকারেন্সি (১০টি সমান্তরাল রিকোয়েস্টে ৬ অনুমোদন / ৪ ব্লক), রিইউজ এবং স্লাইডিং উইন্ডো এক্সপায়ারি যাচাই করে।
+5. **Cloudflare R2 Direct Presigned Streaming (`lib/r2Signer.js` ও `scripts/migrate-dropbox-to-r2.mjs`):**
+   - `r2://<objectKey>` ফরম্যাটের অডিওর জন্য `/api/audio/play-permission` ৩০ মিনিট মেয়াদি AWS SigV4 Presigned URL (`directUrl`) রিটার্ন করে (এবং `/api/stream` `302` রিডাইরেক্ট করে)।
+   - ফলে অডিও বাইট সরাসরি **Cloudflare R2 ➔ ব্রাউজারে** স্ট্রিম ও IndexedDB-তে ক্যাশ হয় (**০ MB Vercel Fast Origin Transfer**), আর পুরনো Dropbox লিংকগুলোও আগের মতোই সাপোর্টেড থাকে।
+   - Dropbox থেকে সব অডিও R2-তে মাইগ্রেট করতে: `node scripts/migrate-dropbox-to-r2.mjs --dry-run` (প্রিভিউ) এবং `node scripts/migrate-dropbox-to-r2.mjs` (মাইগ্রেশন)।
