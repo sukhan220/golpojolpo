@@ -228,7 +228,7 @@ function MainApp() {
       <main ref={mainRef}>
         <PullToRefresh
           containerRef={mainRef}
-          onRefresh={() => DataService.syncWithReverseApi()}
+          onRefresh={() => DataService.syncWithReverseApi(true)}
         />
         {route === "home" && (
           <HomeView

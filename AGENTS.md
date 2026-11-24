@@ -52,7 +52,7 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
     - `normalizeCategory(id, data)`, `normalizeAudioBook(id, data)`, `normalizeShortStory(id, data)`, `normalizeWriter(id, data)` — Firestore এবং Reverse API উভয় ক্ষেত্রের ডাটাকে একই স্ট্যান্ডার্ড ফরম্যাটে সাজায় (মাল্টি-পার্ট অডিওসহ)।
     - `fetchCategoriesOnce()`, `fetchAudioBooksOnce()`, `fetchShortStoriesOnce()`, `fetchWritersOnce()`, `fetchBookNestedSubcollectionsOnce(bookId, parentBook)` — ক্যাশ খালি থাকলে কেবল একবার ফায়ারবেজ থেকে ডাটা আনে।
     - `subscribeToAudioBooks`, `subscribeToBookNestedSubcollections`, `subscribeToCategories`, `subscribeToShortStories`, `subscribeToWriters`, `subscribeToReaderBooks` — লিগ্যাসি ও কম্প্যাটিবিলিটি সাবস্ক্রিপশন মেথড।
-- `lib/dataService.js` — **ক্যাশ-ফার্স্ট ইউনিফাইড ডাটা রিপোজিটরি লেয়ার**। ফায়ারবেজ সবসময় হিট না করে প্রথমে `localStorage` ও মেমরি ক্যাশ (`golpojolpo_cache_v3_*`) থেকে ডাটা রিটার্ন করে। ক্যাশ খালি থাকলেই কেবল একবার ফায়ারবেজ থেকে (`getDocs`) ফেচ করে ক্যাশ করে রাখে। এছাড়াও Reverse API (`/api/sync`) থেকে নতুন ডাটা আসলে সরাসরি ক্যাশে অ্যাড/আপডেট করে।
+- `lib/dataService.js` — **ক্যাশ-ফার্স্ট ইউনিফাইড ডাটা রিপোজিটরি লেয়ার**। ফায়ারবেজ সবসময় হিট না করে প্রথমে `localStorage` ও মেমরি ক্যাশ (`golpojolpo_cache_v9_*`) থেকে ডাটা রিটার্ন করে। ক্যাশ খালি থাকলেই কেবল একবার Edge-Cached `/api/catalog` থেকে এক রিকোয়েস্টে সব কালেকশন ফেচ করে ক্যাশ করে রাখে (এবং ফলব্যাক হিসেবে সরাসরি ফায়ারবেজ `getDocs` রাখে)। এছাড়াও Reverse API (`/api/sync`) থেকে নতুন ডাটা আসলে সরাসরি ক্যাশে অ্যাড/আপডেট করে।
   - **Class & Methods (`DataService`):**
     - `DataService.listenCategories(callback)`
     - `DataService.listenAudioBooks(callback)`
@@ -62,9 +62,10 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
     - `DataService.syncWithReverseApi()`
     - `DataService.applyReverseEvent(event)`
     - `DataService.getMagazines()`
-- `lib/audioCrypto.js` — অডিও লিংক ইনক্রিপশন ও ডিক্রিপশন ইউটিলিটি (`encryptAudioUrl`, `decryptAudioToken`)। যাতে ব্রাউজারের DOM (`<audio src="...">`), লোকাল ক্যাশ বা নেটওয়ার্ক ট্যাবে আসল Dropbox বা এক্সটার্নাল অডিও লিংক দেখা না যায়।
-- `app/api/stream/route.js` — **Encrypted Audio Stream Proxy (`GET /api/stream?t=<token>`)**। ইনক্রিপ্টেড টোকেন ডিক্রিপ্ট করে সার্ভার থেকে সরাসরি অডিও বাইট স্ট্রিম (`206 Partial Content` ও `Range` সাপোর্টসহ) পাঠায়।
-- `lib/cacheStore.js` — সার্ভার-সাইড ক্যাশ ভার্সন এবং Reverse API ইভেন্ট বাফার (`getServerSyncState`, `recordReverseApiEvent`)।
+- `app/api/catalog/route.js` — **Edge-Cached Public Catalog API (`GET /api/catalog`)**। Vercel Edge CDN-এ ১৫ মিনিট (`s-maxage=900, stale-while-revalidate=86400`) এবং সার্ভার মেমোরিতে ক্যাশ করা পাবলিক ক্যাটালগ বান্ডেল (`categories`, `books`, `shortStory`, `writer`)। সার্ভার সাইডেই অডিও লিংক এনক্রিপ্ট করে পাঠায় এবং ফায়ারবেজ কোটা শেষ হলে বা ডাউন থাকলে স্বয়ংক্রিয়ভাবে Neon PostgreSQL (Prisma) থেকে ডাটা সার্ভ করে।
+- `lib/audioCrypto.js` — অডিও লিংক ইনক্রিপশন ও ডিক্রিপশন ইউটিলিটি (`encryptAudioUrl`, `decryptAudioToken`)। যাতে ব্রাউজারের DOM (`<audio src="...">`), লোকাল ক্যাশ বা নেটওয়ার্ক ট্যাবে আসল R2/Dropbox বা এক্সটার্নাল অডিও লিংক দেখা না যায়।
+- `app/api/stream/route.js` — **Zero-Byte Encrypted Audio Redirector & eBook Text Proxy (`GET /api/stream?t=<token>`)**। অডিও টোকেন ভেরিফাই করে সরাসরি `302 Redirect` (Cloudflare R2 Presigned URL বা এক্সটার্নাল লিংকে) পাঠায় যাতে Vercel Fast Origin Transfer সবসময় ০ বাইট থাকে।
+- `lib/cacheStore.js` — সার্ভার-সাইড ক্যাশ ভার্সন, ক্যাটালগ বান্ডেল মেমোরি ক্যাশ এবং Reverse API ইভেন্ট বাফার (`getServerSyncState`, `getServerCatalogCache`, `setServerCatalogCache`, `invalidateServerCatalogCache`, `recordReverseApiEvent`)।
 - `app/api/sync/route.js` — **Reverse API / Webhook এন্ডপয়েন্ট (`GET` ও `POST /api/sync`)**। নতুন কোনো বই, ক্যাটাগরি বা লেখক যোগ করলে এই API-তে `POST` রিকোয়েস্ট পাঠালে ফায়ারবেজ রি-স্ক্যান ছাড়াই সাথে সাথে অ্যাপের ক্যাশে যুক্ত হয়ে যায় অথবা নির্দিষ্ট কালেকশনের ক্যাশ রিফ্রেশ করে।
 - `lib/mockData.js` — অফলাইন প্রিভিউ ও ফলব্যাকের জন্য নমুনা ডাটা (`MOCK_CATEGORIES`, `MOCK_WRITERS`, `MOCK_AUDIO_BOOKS`, `MOCK_SHORT_STORIES`, `MOCK_MAGAZINES`)।
 - `lib/speedMap.js` — ই-বুক রিডারের অটো-স্ক্রল স্পিড ম্যাপিং কনস্ট্যান্ট (`SPEED_MAP`)।

@@ -94,8 +94,10 @@ export async function POST(request) {
       data,
     });
 
-    // Revalidate Next.js route cache
+    // Revalidate Next.js route, Sync endpoint & Edge-Cached Catalog API immediately
     revalidatePath("/");
+    revalidatePath("/api/catalog");
+    revalidatePath("/api/sync");
 
     return NextResponse.json({
       ok: true,
