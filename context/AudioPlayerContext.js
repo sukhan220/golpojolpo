@@ -4,6 +4,7 @@ import React, { createContext, useContext, useEffect, useRef, useState } from "r
 import { formatAudioUrl } from "../lib/firebase";
 import {
   getOfflineCachedAudioUrl,
+  getReadyMemoryBlobUrl,
   cacheAudioInBackground,
   invalidateOfflineCachedAudio,
   releaseOfflineAudioOwner,
@@ -640,11 +641,8 @@ export function AudioPlayerProvider({ children }) {
       cacheAudioInBackground(
         streamUrl,
         ({ loadedBytes, totalBytes, complete, blobUrl }) => {
-          if (
-            !isMountedRef.current ||
-            sourceTokenRef.current !== loadToken ||
-            loadedStreamKeyRef.current !== streamUrl
-          ) {
+          // Only check that this track (`streamUrl`) is still the loaded track (do NOT abort hot-swap if loadToken bumped on retry/seek!)
+          if (!isMountedRef.current || loadedStreamKeyRef.current !== streamUrl) {
             return;
           }
           if (totalBytes > 0) {
@@ -657,8 +655,8 @@ export function AudioPlayerProvider({ children }) {
             }
           }
 
-          // Seamless hot-swap: once full file is in IndexedDB, switch `<audio>` to local `blob:` URL
-          // to stop all ongoing browser 206 Range requests to `/api/stream`!
+          // Seamless hot-swap: once full file is encrypted in IDB & decrypted in RAM, switch `<audio>` to `blob:` URL
+          // so seeking forward/backward NEVER sends another 206 request to Vercel or R2!
           if (
             complete &&
             blobUrl &&
@@ -885,33 +883,129 @@ export function AudioPlayerProvider({ children }) {
 
   /**
    * Restores the last played audio track from history (without auto-playing),
-   * or falls back to the first real Firebase/cached audiobook if no history exists.
+   * falls back to the first real Firebase/cached audiobook if no history exists,
+   * and auto-upgrades any stale cached/Dropbox URLs in History, Recent, Playlists & currentTrack
+   * to the latest R2/Firestore stream tokens.
    */
-  const syncInitialTrack = (firstRealBook) => {
+  const syncInitialTrack = (firstRealBook, allRealBooks = []) => {
     if (!firstRealBook || firstRealBook.isMock) return;
+
+    const freshUrlById = new Map();
+    const booksList = Array.isArray(allRealBooks) && allRealBooks.length > 0 ? allRealBooks : [firstRealBook];
+    for (const b of booksList) {
+      if (!b || b.isMock || !b.id) continue;
+      const formattedBookUrl = formatAudioUrl(b.url);
+      if (formattedBookUrl) {
+        freshUrlById.set(b.id, formattedBookUrl);
+      }
+      if (Array.isArray(b.tracks)) {
+        for (const sub of b.tracks) {
+          if (sub && sub.id) {
+            const subUrl = formatAudioUrl(sub.url);
+            if (subUrl) freshUrlById.set(sub.id, subUrl);
+          }
+        }
+      }
+    }
+
+    const upgradeTrackObj = (t) => {
+      if (!t || !t.id) return t;
+      const fresh = freshUrlById.get(t.id) || (t.bookId ? freshUrlById.get(t.bookId) : "");
+      if (fresh && fresh !== t.url) {
+        return { ...t, url: fresh };
+      }
+      return t;
+    };
+
+    if (freshUrlById.size > 0) {
+      // 1. Upgrade stale URLs inside History
+      const curHist = historyItemsRef.current || [];
+      let histChanged = false;
+      const nextHist = curHist.map((item) => {
+        if (!item || item.type !== "audio" || !item.track) return item;
+        const upTrack = upgradeTrackObj(item.track);
+        let listChanged = false;
+        const upList = Array.isArray(item.playlist)
+          ? item.playlist.map((pt) => {
+              const upPt = upgradeTrackObj(pt);
+              if (upPt !== pt) listChanged = true;
+              return upPt;
+            })
+          : item.playlist;
+        if (upTrack !== item.track || listChanged) {
+          histChanged = true;
+          return { ...item, track: upTrack, playlist: upList };
+        }
+        return item;
+      });
+      if (histChanged) {
+        persistHistory(nextHist, true);
+      }
+
+      // 2. Upgrade stale URLs inside Recent-6 Playlist
+      const curRecent = recentPlaylistRef.current || [];
+      let recentChanged = false;
+      const nextRecent = curRecent.map((rt) => {
+        const upRt = upgradeTrackObj(rt);
+        if (upRt !== rt) recentChanged = true;
+        return upRt;
+      });
+      if (recentChanged) {
+        persistRecentPlaylist(nextRecent);
+      }
+
+      // 3. Upgrade stale URLs inside User Playlists
+      setUserPlaylists((prevLists) => {
+        if (!Array.isArray(prevLists)) return prevLists;
+        let plChanged = false;
+        const nextLists = prevLists.map((pl) => {
+          if (!pl || !Array.isArray(pl.tracks)) return pl;
+          let trChanged = false;
+          const nextTracks = pl.tracks.map((pt) => {
+            const upPt = upgradeTrackObj(pt);
+            if (upPt !== pt) trChanged = true;
+            return upPt;
+          });
+          if (trChanged) {
+            plChanged = true;
+            return { ...pl, tracks: nextTracks };
+          }
+          return pl;
+        });
+        if (plChanged && typeof window !== "undefined") {
+          try {
+            window.localStorage.setItem(USER_PLAYLISTS_KEY, JSON.stringify(nextLists));
+          } catch {
+            // ignore
+          }
+        }
+        return plChanged ? nextLists : prevLists;
+      });
+    }
+
     setCurrentTrack((prev) => {
       if (!prev || prev.isMock) {
         const lastAudio = getLastPlayedAudioFromHistory();
         if (lastAudio && lastAudio.track) {
-          const restoredTrack = {
+          const baseRestored = upgradeTrackObj({
             ...lastAudio.track,
             url: formatAudioUrl(lastAudio.track.url),
-          };
+          });
           const restoredList =
             Array.isArray(lastAudio.playlist) && lastAudio.playlist.length > 0
-              ? lastAudio.playlist
-              : [restoredTrack];
-          const idx = restoredList.findIndex((t) => t.id === restoredTrack.id);
+              ? lastAudio.playlist.map(upgradeTrackObj)
+              : [baseRestored];
+          const idx = restoredList.findIndex((t) => t.id === baseRestored.id);
           const safeIdx = idx >= 0 ? idx : 0;
           const restoredTime = Number(lastAudio.currentTime) || 0;
-          const restoredDur = Number(lastAudio.duration) || restoredTrack.durationSec || 1800;
+          const restoredDur = Number(lastAudio.duration) || baseRestored.durationSec || 1800;
 
           syncPlaylistState(restoredList, safeIdx);
           currentTimeRef.current = restoredTime;
           setCurrentTime(restoredTime);
           durationRef.current = restoredDur;
           setDuration(restoredDur);
-          return restoredTrack;
+          return baseRestored;
         }
 
         const hasParts = Array.isArray(firstRealBook.tracks) && firstRealBook.tracks.length > 0;
@@ -927,6 +1021,17 @@ export function AudioPlayerProvider({ children }) {
           url: formatAudioUrl(target.url || firstRealBook.url),
         };
       }
+
+      // If `prev` was restored on mount before `allRealBooks` arrived and isn't actively playing yet, upgrade its URL too!
+      if (!audioRef.current?.src && freshUrlById.size > 0) {
+        const upgradedPrev = upgradeTrackObj(prev);
+        if (Array.isArray(playlistRef.current) && playlistRef.current.length > 0) {
+          const upgradedPl = playlistRef.current.map(upgradeTrackObj);
+          syncPlaylistState(upgradedPl, playlistIndexRef.current);
+        }
+        return upgradedPrev;
+      }
+
       return prev;
     });
   };
@@ -1498,7 +1603,31 @@ export function AudioPlayerProvider({ children }) {
     setCurrentTime(target);
 
     if (a && a.src) {
-      if (a.readyState >= 1) {
+      // If a decrypted in-memory `blob:` URL is ready while `<audio>` is still on a network URL,
+      // hot-swap immediately before seeking so ZERO 206 requests hit Vercel or R2!
+      const readyBlob =
+        !String(a.src).startsWith("blob:") && loadedStreamKeyRef.current
+          ? getReadyMemoryBlobUrl(loadedStreamKeyRef.current, ownerIdRef.current)
+          : null;
+
+      if (readyBlob) {
+        const wasPlaying = !a.paused && wantPlayingRef.current;
+        const swapToken = ++sourceTokenRef.current;
+        pendingResumeTimeRef.current = target;
+        usingPartialBlobRef.current = false;
+        activeAudioSrcRef.current = normalizeComparableUrl(readyBlob);
+        a.__gjLoadToken = swapToken;
+        a.src = readyBlob;
+        a.playbackRate = speedRef.current;
+        a.volume = Math.max(0, Math.min(1, volumeRef.current / 100));
+        a.load();
+        if (wasPlaying) {
+          const p = a.play();
+          if (p !== undefined) {
+            p.catch(() => {});
+          }
+        }
+      } else if (a.readyState >= 1) {
         try {
           a.currentTime = target;
           pendingResumeTimeRef.current = null;

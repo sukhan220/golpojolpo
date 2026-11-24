@@ -14,15 +14,26 @@ export async function GET(request) {
   const sinceVersion = Number(searchParams.get("sinceVersion") || 0);
 
   const state = getServerSyncState();
-  const events = state.pushedEvents.filter((e) => e.version > sinceVersion);
+  const events =
+    sinceVersion > 0
+      ? state.pushedEvents.filter((e) => e.version > sinceVersion)
+      : state.pushedEvents;
 
-  return NextResponse.json({
-    ok: true,
-    version: state.version,
-    collectionVersions: state.collectionVersions,
-    lastUpdated: state.lastUpdated,
-    events,
-  });
+  return NextResponse.json(
+    {
+      ok: true,
+      version: state.version,
+      collectionVersions: state.collectionVersions,
+      lastUpdated: state.lastUpdated,
+      events,
+    },
+    {
+      headers: {
+        // Cache at Vercel Edge CDN for 5 minutes so all visitors share 1 Edge response (0 Fast Origin Transfer!)
+        "Cache-Control": "public, max-age=60, s-maxage=300, stale-while-revalidate=600",
+      },
+    }
+  );
 }
 
 /**

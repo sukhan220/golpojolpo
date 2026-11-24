@@ -38,8 +38,11 @@ export async function GET(request) {
     }
     targetUrl = decryptAudioToken(token) || "";
 
-    // If this audio lives in Cloudflare R2 (`r2://...`), 302 redirect to a short-lived
-    // Presigned URL so ZERO audio bytes pass through Vercel Fast Origin Transfer!
+    // Zero Fast Origin Transfer Lock:
+    // NEVER proxy audio bytes through Vercel Serverless Functions!
+    // 1. If stored in Cloudflare R2 (`r2://...`), 302 redirect to a short-lived SigV4 Presigned URL.
+    // 2. Even if a legacy/external URL (Dropbox/Drive/HTTPS) is encountered, 302 redirect directly
+    //    to the upstream media URL so 0 audio bytes EVER pass through Vercel Origin!
     const r2Key = extractR2ObjectKey(targetUrl);
     if (r2Key) {
       const signedR2Url = createR2PresignedGetUrl(r2Key, 1800);
@@ -49,7 +52,23 @@ export async function GET(request) {
           headers: { "Cache-Control": "no-store" },
         });
       }
+      return NextResponse.json(
+        { error: "R2 storage configuration unavailable" },
+        { status: 503, headers: { "Cache-Control": "no-store" } }
+      );
     }
+
+    if (targetUrl.startsWith("http://") || targetUrl.startsWith("https://")) {
+      return NextResponse.redirect(targetUrl, {
+        status: 302,
+        headers: { "Cache-Control": "private, max-age=1800" },
+      });
+    }
+
+    return NextResponse.json(
+      { error: "Unsupported audio source" },
+      { status: 400, headers: { "Cache-Control": "no-store" } }
+    );
   } else if (rawUrlParam) {
     // Reconstruct the full external URL from the raw query string so unencoded '&' parameters
     // (such as Dropbox's &st=...&raw=1) are never stripped by searchParams.get("url")!
@@ -105,14 +124,31 @@ export async function GET(request) {
       );
     }
 
+    const upstreamType = (upstream.headers.get("content-type") || "").toLowerCase();
+    const contentLengthNum = Number(upstream.headers.get("content-length") || 0);
+    const MAX_TEXT_PROXY_BYTES = 5 * 1024 * 1024; // 5 MB strict cap (eBook .txt files only)
+
+    // Hard guard: never proxy audio/video or large binaries even via `?url=`
+    if (
+      upstreamType.startsWith("audio/") ||
+      upstreamType.startsWith("video/") ||
+      contentLengthNum > MAX_TEXT_PROXY_BYTES
+    ) {
+      try {
+        await upstream.body?.cancel();
+      } catch {
+        // ignore
+      }
+      return NextResponse.redirect(targetUrl, {
+        status: 302,
+        headers: { "Cache-Control": "public, max-age=3600" },
+      });
+    }
+
     const responseHeaders = new Headers();
     responseHeaders.set(
       "Content-Type",
-      upstream.headers.get("content-type") || "audio/mpeg"
-    );
-    responseHeaders.set(
-      "Accept-Ranges",
-      upstream.headers.get("accept-ranges") || "bytes"
+      upstream.headers.get("content-type") || "text/plain; charset=utf-8"
     );
 
     const contentLength = upstream.headers.get("content-length");
@@ -120,12 +156,11 @@ export async function GET(request) {
       responseHeaders.set("Content-Length", contentLength);
     }
 
-    const contentRange = upstream.headers.get("content-range");
-    if (contentRange) {
-      responseHeaders.set("Content-Range", contentRange);
-    }
-
-    responseHeaders.set("Cache-Control", "private, max-age=86400, immutable");
+    // Cache public eBook text at Vercel Edge CDN for 7 days (0 repeat Fast Origin Transfer!)
+    responseHeaders.set(
+      "Cache-Control",
+      "public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400"
+    );
 
     return new Response(upstream.body, {
       status: upstream.status,

@@ -74,7 +74,7 @@ function MainApp() {
     const unsubAudio = DataService.listenAudioBooks((data) => {
       setAudioBooks(data);
       if (Array.isArray(data) && data.length > 0) {
-        syncInitialTrack(data[0]);
+        syncInitialTrack(data[0], data);
       }
     });
     const unsubStories = DataService.listenShortStories((data) => setShortStories(data));

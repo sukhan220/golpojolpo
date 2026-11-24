@@ -94,7 +94,13 @@ export async function GET(request) {
     const jwtToken = signAuthJwt(user);
 
     const response = NextResponse.redirect(`${origin}/`);
-    response.cookies.set(AUTH_COOKIE_NAME, jwtToken, getCookieOptions());
+    const cookieOpts = getCookieOptions();
+    response.cookies.set(AUTH_COOKIE_NAME, jwtToken, cookieOpts);
+    // Non-sensitive client presence hint so logged-out Guests never call `/api/auth/me`
+    response.cookies.set("gj_logged_in", "1", {
+      ...cookieOpts,
+      httpOnly: false,
+    });
     response.cookies.delete(OAUTH_STATE_COOKIE);
     return response;
   } catch (err) {
