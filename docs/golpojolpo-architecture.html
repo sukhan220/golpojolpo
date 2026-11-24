@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>গল্প জল্প (GolpoJolpo) — Complete System Architecture</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: #060807;
+      color: #f3f5f4;
+      font-family: "Hind Siliguri", "Noto Sans Bengali", "Segoe UI", system-ui, -apple-system, sans-serif;
+      line-height: 1.55;
+      padding: 40px 18px 80px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .canvas {
+      max-width: 880px;
+      margin: 0 auto;
+    }
+
+    /* Top Header */
+    .hero {
+      text-align: center;
+      margin-bottom: 34px;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(16, 185, 129, 0.14);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+      color: #34d399;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 5px 14px;
+      border-radius: 999px;
+      margin-bottom: 12px;
+      letter-spacing: 0.2px;
+    }
+
+    .hero h1 {
+      font-size: 28px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: -0.3px;
+      margin-bottom: 6px;
+    }
+
+    .hero p {
+      font-size: 14px;
+      color: #9ca3af;
+    }
+
+    /* Filter Navigation */
+    .filter-bar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px;
+      margin-bottom: 36px;
+    }
+
+    .filter-btn {
+      background: #0d110f;
+      color: #9ca3af;
+      border: 1px solid #1f2622;
+      padding: 7px 16px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .filter-btn:hover {
+      border-color: #2f3b35;
+      color: #e5e7eb;
+    }
+
+    .filter-btn.active {
+      background: rgba(16, 185, 129, 0.16);
+      border-color: #10b981;
+      color: #34d399;
+      font-weight: 600;
+    }
+
+    /* Section Divider */
+    .section-block {
+      margin-bottom: 48px;
+    }
+
+    .section-label {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      margin-bottom: 26px;
+    }
+
+    .section-label::before,
+    .section-label::after {
+      content: "";
+      height: 1px;
+      flex: 1;
+      background: linear-gradient(90deg, transparent, #1f2924, transparent);
+    }
+
+    .section-label span {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #6ee7b7;
+      background: #0c1310;
+      border: 1px solid #1b2e25;
+      padding: 4px 14px;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+
+    /* Standalone Center Icon Node (matches Cloudflare R2 & Audio Player in screenshot) */
+    .icon-node {
+      text-align: center;
+      padding: 10px 16px;
+    }
+
+    .icon-node svg {
+      width: 28px;
+      height: 28px;
+      margin: 0 auto 8px;
+      display: block;
+      color: #e5e7eb;
+    }
+
+    .icon-node.green svg {
+      color: #22c55e;
+    }
+
+    .icon-node h3 {
+      font-size: 19px;
+      font-weight: 700;
+      color: #ffffff;
+      margin-bottom: 3px;
+    }
+
+    .icon-node p {
+      font-size: 14px;
+      color: #9ca3af;
+    }
+
+    /* Vertical Flow Connector (Arrow + Optional Green Pill) */
+    .connector {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      margin: 14px 0;
+      gap: 8px;
+    }
+
+    .arrow {
+      color: #8b9590;
+      font-size: 16px;
+      line-height: 1;
+      user-select: none;
+    }
+
+    .pill {
+      display: inline-block;
+      background: rgba(16, 185, 129, 0.14);
+      border: 1px solid rgba(16, 185, 129, 0.28);
+      color: #22c55e;
+      font-size: 12.5px;
+      font-weight: 600;
+      padding: 4px 14px;
+      border-radius: 999px;
+    }
+
+    .pill.subtle {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(255, 255, 255, 0.12);
+      color: #d1d5db;
+    }
+
+    /* Dark Outlined Box (matches Audio Chunk Manager in screenshot) */
+    .card-dark {
+      background: #0a0d0c;
+      border: 1px solid #1f2421;
+      border-radius: 14px;
+      padding: 22px 24px;
+      transition: border-color 0.2s ease;
+    }
+
+    .card-dark:hover {
+      border-color: #2e3833;
+    }
+
+    /* Highlighted Emerald Outlined Box (matches IndexedDB in screenshot) */
+    .card-emerald {
+      background: linear-gradient(180deg, rgba(16, 185, 129, 0.05) 0%, rgba(10, 13, 12, 0.95) 100%);
+      border: 1.5px solid #00c853;
+      border-radius: 14px;
+      padding: 26px 24px;
+      text-align: center;
+      box-shadow: 0 0 32px rgba(0, 200, 83, 0.06);
+    }
+
+    .card-header-left {
+      font-size: 17px;
+      font-weight: 700;
+      color: #ffffff;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .card-footer-note {
+      margin-top: 20px;
+      font-size: 13.5px;
+      color: #9ca3af;
+    }
+
+    /* 3-Column Sub-grid inside Dark Cards (matches Chunk 001 / 002 / 003) */
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      text-align: center;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+    }
+
+    .mini-item {
+      padding: 12px 10px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.015);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .mini-item svg {
+      width: 22px;
+      height: 22px;
+      margin: 0 auto 8px;
+      display: block;
+      color: #d1d5db;
+    }
+
+    .mini-item.green-icon svg {
+      color: #34d399;
+    }
+
+    .mini-item h4 {
+      font-size: 13.5px;
+      font-weight: 700;
+      color: #f3f4f6;
+      margin-bottom: 3px;
+    }
+
+    .mini-item p {
+      font-size: 12px;
+      color: #8b9590;
+    }
+
+    /* Dual Source Row */
+    .dual-card {
+      background: #0a0d0c;
+      border: 1px solid #1f2421;
+      border-radius: 14px;
+      padding: 20px;
+      text-align: center;
+    }
+
+    .dual-card h4 {
+      font-size: 16px;
+      font-weight: 700;
+      color: #ffffff;
+      margin-top: 8px;
+      margin-bottom: 4px;
+    }
+
+    .dual-card p {
+      font-size: 13px;
+      color: #9ca3af;
+    }
+
+    /* Free Quota Footer Summary */
+    .quota-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .quota-box {
+      background: #0a0d0c;
+      border: 1px solid #1f2421;
+      border-radius: 12px;
+      padding: 14px 12px;
+      text-align: center;
+    }
+
+    .quota-box .val {
+      font-size: 16px;
+      font-weight: 700;
+      color: #22c55e;
+      margin-bottom: 2px;
+    }
+
+    .quota-box .lbl {
+      font-size: 12px;
+      color: #9ca3af;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    @media (max-width: 680px) {
+      .grid-3,
+      .grid-2,
+      .quota-grid {
+        grid-template-columns: 1fr;
+      }
+      .hero h1 {
+        font-size: 22px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="canvas">
+    <!-- HEADER -->
+    <div class="hero">
+      <div class="hero-badge">● Production Architecture • Zero Origin Transfer</div>
+      <h1>গল্প জল্প (GolpoJolpo) — সিস্টেম আর্কিটেকচার</h1>
+      <p>Next.js 16.4 • Cloudflare R2 • Edge Catalog CDN • AES-GCM Chunked IndexedDB • Neon PostgreSQL</p>
+    </div>
+
+    <!-- FILTER TABS -->
+    <div class="filter-bar">
+      <button class="filter-btn active" onclick="filterSection('all', this)">সম্পূর্ণ সিস্টেম (Full View)</button>
+      <button class="filter-btn" onclick="filterSection('catalog', this)">১. ক্যাটালগ ও পেজ ক্যাশ</button>
+      <button class="filter-btn" onclick="filterSection('audio', this)">২. অডিও R2 ও Chunk ইঞ্জিন</button>
+      <button class="filter-btn" onclick="filterSection('auth', this)">৩. Auth, ই-বুক ও ডাটাবেস</button>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- SECTION 1: EDGE-CACHED CATALOG & PAGE DELIVERY                        -->
+    <!-- ===================================================================== -->
+    <div class="section-block" data-sec="catalog">
+      <div class="section-label">
+        <span>ধাপ ১ • ক্যাটালগ ও পেজ লোড ফ্লো (Edge-Cached Catalog)</span>
+      </div>
+
+      <div class="grid-2">
+        <div class="dual-card">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="margin:0 auto;display:block;">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+          </svg>
+          <h4>Firebase Cloud Firestore</h4>
+          <p>প্রাইমারি ডাটাবেস (Categories, Books, ShortStory, Writer)</p>
+        </div>
+
+        <div class="dual-card">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="margin:0 auto;display:block;">
+            <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+          </svg>
+          <h4>Neon PostgreSQL (Prisma)</h4>
+          <p>স্বয়ংক্রিয় মিরর ব্যাকআপ (Firebase ডাউন বা কোটা শেষ হলে সার্ভ করে)</p>
+        </div>
+      </div>
+
+      <div class="connector">
+        <span class="arrow">↓</span>
+        <span class="pill">১৫ মিনিটে মাত্র ১ বার Sync (কেবল ইউজার ঢুকলে)</span>
+      </div>
+
+      <div class="card-emerald">
+        <div class="icon-node green" style="padding:0;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+          </svg>
+          <h3>Vercel Edge CDN (/api/catalog)</h3>
+        </div>
+        <div style="margin: 10px 0;">
+          <span class="pill">s-maxage=900 • Server-Side URL Encryption</span>
+        </div>
+        <p style="font-size:14px; color:#d1d5db;">
+          সার্ভারেই আসল <code>r2://</code> লিংক এনক্রিপ্ট হয়ে মাত্র ~১৫ KB JSON আকারে Edge CDN থেকে লাখো ভিজিটরের কাছে যায়
+        </p>
+      </div>
+
+      <div class="connector">
+        <span class="arrow">↓</span>
+        <span class="pill">১টি রিকোয়েস্টেই ৪টি কালেকশন লোড</span>
+      </div>
+
+      <div class="card-dark">
+        <div class="card-header-left">
+          <span>Browser Client Cache Layer (DataService v9)</span>
+          <span class="pill subtle">0 Reload Hits</span>
+        </div>
+        <div class="grid-3">
+          <div class="mini-item green-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/>
+            </svg>
+            <h4>LocalStorage Cache (v9)</h4>
+            <p>১৫ মিনিটের রিলোড লক • বারবার রিলোডে ০ সার্ভার কল</p>
+          </div>
+          <div class="mini-item green-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+            <h4>Service Worker (v4)</h4>
+            <p>HTML শেল ও Static JS/CSS অফলাইনে ক্যাশ রাখে</p>
+          </div>
+          <div class="mini-item green-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+            </svg>
+            <h4>Pull-to-Refresh & Sync</h4>
+            <p>মোবাইলে নিচে টানলে বা ১৫ মি. পর ব্যাকগ্রাউন্ডে নতুন বই যুক্ত হয়</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- SECTION 2: AUDIO R2 STREAMING, CHUNK MANAGER & ENCRYPTED INDEXEDDB    -->
+    <!-- ===================================================================== -->
+    <div class="section-block" data-sec="audio">
+      <div class="section-label">
+        <span>ধাপ ২ • অডিও স্ট্রিমিং, এনক্রিপশন ও অফলাইন চাঙ্ক ইঞ্জিন</span>
+      </div>
+
+      <!-- Rate Limit Gate -->
+      <div class="card-dark" style="text-align:center;">
+        <div class="icon-node" style="padding:0;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+          </svg>
+          <h3>Playback Permission Gate (/api/audio/play-permission)</h3>
+          <p>৩০ মিনিটে সর্বোচ্চ ৬টি নতুন অডিও (Guest ও User) • Staff আনলিমিটেড • PostgreSQL Advisory Lock</p>
+        </div>
+      </div>
+
+      <div class="connector">
+        <span class="arrow">↓</span>
+        <span class="pill">অনুমোদন সফল • ৩০ মিনিটের AWS SigV4 Presigned URL</span>
+      </div>
+
+      <!-- Cloudflare R2 Node (Exact match to screenshot) -->
+      <div class="icon-node">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>
+        </svg>
+        <h3>Cloudflare R2</h3>
+        <p>Original Audio File (128kbps MP3 • Zero Bandwidth Fee • Vercel 0 Byte)</p>
+      </div>
+
+      <div class="connector">
+        <span class="arrow">↓</span>
+        <span class="pill">প্রথমবার Download</span>
+      </div>
+
+      <!-- Audio Chunk Manager Card (Exact match to screenshot) -->
+      <div class="card-dark">
+        <div class="card-header-left">
+          <span>Audio Chunk &amp; Crypto Manager</span>
+          <span class="pill">Web Crypto AES-GCM 256-bit</span>
+        </div>
+
+        <div class="grid-3">
+          <div class="mini-item">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <line x1="4" y1="10" x2="4" y2="14"/><line x1="8" y1="7" x2="8" y2="17"/><line x1="12" y1="4" x2="12" y2="20"/><line x1="16" y1="7" x2="16" y2="17"/><line x1="20" y1="10" x2="20" y2="14"/>
+            </svg>
+            <h4>Chunk 001</h4>
+            <p>2 MB Binary + 12B IV</p>
+          </div>
+          <div class="mini-item">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <line x1="4" y1="10" x2="4" y2="14"/><line x1="8" y1="7" x2="8" y2="17"/><line x1="12" y1="4" x2="12" y2="20"/><line x1="16" y1="7" x2="16" y2="17"/><line x1="20" y1="10" x2="20" y2="14"/>
+            </svg>
+            <h4>Chunk 002</h4>
+            <p>2 MB Binary + 12B IV</p>
+          </div>
+          <div class="mini-item">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <line x1="4" y1="10" x2="4" y2="14"/><line x1="8" y1="7" x2="8" y2="17"/><line x1="12" y1="4" x2="12" y2="20"/><line x1="16" y1="7" x2="16" y2="17"/><line x1="20" y1="10" x2="20" y2="14"/>
+            </svg>
+            <h4>Chunk 003</h4>
+            <p>2 MB Binary + 12B IV</p>
+          </div>
+        </div>
+
+        <div class="card-footer-note">
+          প্রতিটি MP3 ফাইল ২ MB বাইনারি অংশে ভাগ হয়ে Non-Extractable <code>AES-GCM</code> কী দিয়ে এনক্রিপ্ট হয় (কোনো <code>audio/mpeg</code> থাকে না)
+        </div>
+      </div>
+
+      <div class="connector">
+        <span class="arrow">↓</span>
+      </div>
+
+      <!-- IndexedDB Card (Exact match to screenshot) -->
+      <div class="card-emerald">
+        <div class="icon-node green" style="padding:0;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+          </svg>
+          <h3>IndexedDB (golpojolpo_offline_audio_v3)</h3>
+        </div>
+        <div style="margin: 10px 0;">
+          <span class="pill">Persistent Encrypted Local Cache (750 MB LRU)</span>
+        </div>
+        <p style="font-size:14.5px; color:#e5e7eb;">
+          প্রতিটি এনক্রিপ্টেড Chunk আলাদাভাবে সংরক্ষিত • কপি করে বাইরে বাজানো বা ডাউনলোড করা অসম্ভব
+        </p>
+      </div>
+
+      <div class="connector">
+        <span class="arrow">↓</span>
+        <span class="pill">RAM Decryption + Ephemeral blob: Hot-Swap</span>
+      </div>
+
+      <!-- Audio Player Node (Exact match to screenshot) -->
+      <div class="icon-node">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/>
+        </svg>
+        <h3>Audio Player</h3>
+        <p>Cache থেকে Instant Playback + 100% Zero-Network Offline Seek (সামনে-পিছনে টানলে ০ সার্ভার রিকোয়েস্ট)</p>
+      </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- SECTION 3: AUTH, EBOOK READER & ENGAGEMENT                            -->
+    <!-- ===================================================================== -->
+    <div class="section-block" data-sec="auth">
+      <div class="section-label">
+        <span>ধাপ ৩ • অথেনটিকেশন, ৩ডি ই-বুক রিডার ও ইউজার এনগেজমেন্ট</span>
+      </div>
+
+      <div class="card-dark">
+        <div class="grid-3">
+          <div class="mini-item green-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+            </svg>
+            <h4>Google OAuth + JWT</h4>
+            <p>৫টি রোল (SUPER_ADMIN, ADMIN, EDITOR, ARTIST, USER) • গেস্টদের 0 Auth API কল</p>
+          </div>
+          <div class="mini-item green-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+            </svg>
+            <h4>3D Page-Turn eBook Reader</h4>
+            <p>৭ দিনের Edge CDN টেক্সট ক্যাশ • ৪টি থিম, হাইলাইট, বুকমার্ক, নোট ও অটো-স্ক্রল</p>
+          </div>
+          <div class="mini-item green-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+            </svg>
+            <h4>Likes, Ratings &amp; Comments</h4>
+            <p>Neon PostgreSQL-এ সংরক্ষিত রিয়েল-টাইম লাইক, ৫-স্টার রেটিং, কমেন্ট ও প্লেলিস্ট</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="quota-grid">
+        <div class="quota-box">
+          <div class="val">0 Byte</div>
+          <div class="lbl">Vercel অডিও অরিজিন ট্রান্সফার</div>
+        </div>
+        <div class="quota-box">
+          <div class="val">597 MB</div>
+          <div class="lbl">R2 স্টোরেজ (২.৪৮ GB সাশ্রয়!)</div>
+        </div>
+        <div class="quota-box">
+          <div class="val">~৩ লক্ষ/মাস</div>
+          <div class="lbl">ফ্রি ভিজিটর সক্ষমতা</div>
+        </div>
+        <div class="quota-box">
+          <div class="val">AES-GCM</div>
+          <div class="lbl">২ MB এনক্রিপ্টেড চাঙ্ক সুরক্ষা</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function filterSection(sec, btn) {
+      document.querySelectorAll(".filter-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      document.querySelectorAll(".section-block").forEach((el) => {
+        if (sec === "all" || el.getAttribute("data-sec") === sec) {
+          el.classList.remove("hidden");
+        } else {
+          el.classList.add("hidden");
+        }
+      });
+    }
+  </script>
+</body>
+</html>

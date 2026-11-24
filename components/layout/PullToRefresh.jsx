@@ -134,8 +134,10 @@ export default function PullToRefresh({ containerRef, onRefresh }) {
           // ignore
         }
         setTimeout(() => {
-          window.location.reload();
-        }, 320);
+          setStatus("idle");
+          setPullDist(0);
+          pullDistRef.current = 0;
+        }, 420);
       } else {
         setStatus("idle");
         setPullDist(0);

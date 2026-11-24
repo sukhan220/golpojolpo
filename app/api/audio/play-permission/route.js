@@ -22,8 +22,13 @@ function resolveDirectR2PlaybackUrl(rawInput, expiresSec = 1800) {
   const decrypted = decryptAudioToken(rawInput);
   if (!decrypted) return null;
   const r2Key = extractR2ObjectKey(decrypted);
-  if (!r2Key) return null;
-  return createR2PresignedGetUrl(r2Key, expiresSec);
+  if (r2Key) {
+    return createR2PresignedGetUrl(r2Key, expiresSec);
+  }
+  if (decrypted.startsWith("http://") || decrypted.startsWith("https://")) {
+    return decrypted;
+  }
+  return null;
 }
 
 /**

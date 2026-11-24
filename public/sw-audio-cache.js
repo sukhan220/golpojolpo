@@ -14,9 +14,11 @@
  *      split audio into 25+ 1MB `206` requests or double-download bandwidth!
  */
 
-const PAGE_CACHE = "golpojolpo_page_cache_v4";
-const STATIC_CACHE = "golpojolpo_static_cache_v4";
+const PAGE_CACHE = "golpojolpo_page_cache_v5";
+const STATIC_CACHE = "golpojolpo_static_cache_v5";
 const VALID_CACHES = new Set([PAGE_CACHE, STATIC_CACHE]);
+const SHELL_REVALIDATE_MS = 15 * 60 * 1000; // Only revalidate `/` HTML shell once per 15 mins
+let lastShellRevalidatedAt = 0;
 const OLD_AUDIO_CHUNK_DBS = [
   "golpojolpo_audio_chunks_v1",
   "golpojolpo_audio_chunks_v2",
@@ -98,28 +100,36 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // 2. HTML Page Navigations (/) -> Stale-While-Revalidate (instant load + works offline!)
+  // 2. HTML Page Navigations (/) -> Throttled Stale-While-Revalidate (0 Vercel CDN hits within 15m!)
   if (req.mode === "navigate") {
     event.respondWith(
       caches.open(PAGE_CACHE).then(async (cache) => {
-        const cached = await cache.match(req);
+        const cached = (await cache.match(req)) || (await cache.match("/"));
+        const now = Date.now();
+
+        if (cached && lastShellRevalidatedAt > 0 && now - lastShellRevalidatedAt < SHELL_REVALIDATE_MS) {
+          return cached;
+        }
+
         const networkPromise = fetch(req)
           .then((res) => {
             if (res && res.ok && res.status === 200) {
-              cache.put(req, res.clone()).catch(() => {});
+              lastShellRevalidatedAt = Date.now();
+              cache.put("/", res.clone()).catch(() => {});
+            } else if (res && res.status === 304) {
+              lastShellRevalidatedAt = Date.now();
             }
             return res;
           })
           .catch(() => null);
 
         if (cached) {
+          lastShellRevalidatedAt = now;
           event.waitUntil(networkPromise);
           return cached;
         }
         const netRes = await networkPromise;
         if (netRes) return netRes;
-        const fallbackHome = await cache.match("/");
-        if (fallbackHome) return fallbackHome;
         return new Response("Offline", { status: 503 });
       })
     );

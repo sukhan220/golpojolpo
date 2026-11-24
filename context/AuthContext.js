@@ -11,7 +11,6 @@ const AuthContext = createContext({
 });
 
 const USER_CACHE_KEY = "gj_user_cache_v1";
-const AUTH_BOOT_KEY = "gj_auth_boot_v1";
 const USER_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
 function hasLoggedInCookie() {
@@ -27,16 +26,9 @@ export function AuthProvider({ children }) {
     if (typeof window === "undefined") return;
 
     const hasCookie = hasLoggedInCookie();
-    let bootChecked = false;
-    try {
-      bootChecked = window.localStorage.getItem(AUTH_BOOT_KEY) === "1";
-    } catch {
-      bootChecked = true;
-    }
 
-    // Fast path for logged-out Guests (0 Vercel Origin hits!):
-    // If no `gj_logged_in=1` cookie exists and one-time legacy boot check already ran, skip `/api/auth/me` completely!
-    if (!force && !hasCookie && bootChecked) {
+    // Fast path for logged-out Guests (0 Vercel Origin hits even on brand-new devices!):
+    if (!force && !hasCookie) {
       setUser(null);
       setLoading(false);
       return;
@@ -61,11 +53,6 @@ export function AuthProvider({ children }) {
 
     try {
       const res = await fetch("/api/auth/me", { credentials: "include" });
-      try {
-        window.localStorage.setItem(AUTH_BOOT_KEY, "1");
-      } catch {
-        // ignore
-      }
       if (res.ok) {
         const data = await res.json();
         const nextUser = data.user || null;
